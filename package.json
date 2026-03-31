@@ -1,0 +1,14 @@
+{
+  "name": "towing-platform",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev:customer": "npm --prefix apps/customer-app start",
+    "dev:driver": "npm --prefix apps/driver-app start",
+    "dev:admin": "npm --prefix apps/admin-web run dev",
+    "supabase:start": "npx supabase@latest start",
+    "supabase:stop": "npx supabase@latest stop",
+    "supabase:reset": "npx supabase@latest db reset",
+    "supabase:status": "npx supabase@latest status"
+  }
+}

@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.DS_Store
+node_modules
+.expo
+.next
+dist
+coverage
+supabase/.branches
+supabase/.temp
