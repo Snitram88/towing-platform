@@ -1,5 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
+  ActivityIndicator,
+  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -9,6 +11,7 @@ import {
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { supabase } from '../lib/supabase';
 import { MapPoint, pointToRegion } from '../lib/booking';
 
 type Props = {
@@ -45,6 +48,67 @@ const shadowCard = {
 
 export default function BookingSummaryScreen({ navigation, route }: Props) {
   const { pickupAddress, pickupPoint, dropAddress, dropPoint, distanceKm, durationMin, estimate, vehicle } = route.params;
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleRequest = async () => {
+    setSubmitting(true);
+
+    const userResult = await supabase.auth.getUser();
+    const user = userResult.data.user;
+
+    if (!user) {
+      setSubmitting(false);
+      Alert.alert('Session expired', 'Please sign in again.');
+      return;
+    }
+
+    const { data: bookingRow, error: bookingError } = await supabase
+      .from('bookings')
+      .insert({
+        customer_id: user.id,
+        vehicle_type_id: vehicle.id,
+        booking_status: 'searching_driver',
+        payment_status: 'unpaid',
+        pickup_address: pickupAddress,
+        pickup_lat: pickupPoint.latitude,
+        pickup_lng: pickupPoint.longitude,
+        drop_address: dropAddress,
+        drop_lat: dropPoint.latitude,
+        drop_lng: dropPoint.longitude,
+        estimated_distance_meters: Math.round(distanceKm * 1000),
+        estimated_duration_seconds: Math.round(durationMin * 60),
+        quoted_amount: Number(estimate.toFixed(2)),
+      })
+      .select('id')
+      .single();
+
+    if (bookingError || !bookingRow) {
+      setSubmitting(false);
+      Alert.alert('Booking failed', bookingError?.message || 'Could not create booking.');
+      return;
+    }
+
+    await supabase.from('booking_status_history').insert({
+      booking_id: bookingRow.id,
+      new_status: 'searching_driver',
+      changed_by: user.id,
+      note: 'Customer created booking from mobile app',
+    });
+
+    setSubmitting(false);
+
+    navigation.navigate('TrackingDemo', {
+      bookingId: bookingRow.id,
+      pickupAddress,
+      pickupPoint,
+      dropAddress,
+      dropPoint,
+      distanceKm,
+      durationMin,
+      estimate,
+      vehicle,
+    });
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -101,22 +165,8 @@ export default function BookingSummaryScreen({ navigation, route }: Props) {
           </View>
         </View>
 
-        <Pressable
-          style={styles.primaryButton}
-          onPress={() =>
-            navigation.navigate('TrackingDemo', {
-              pickupAddress,
-              pickupPoint,
-              dropAddress,
-              dropPoint,
-              distanceKm,
-              durationMin,
-              estimate,
-              vehicle,
-            })
-          }
-        >
-          <Text style={styles.primaryButtonText}>Request tow</Text>
+        <Pressable style={styles.primaryButton} onPress={handleRequest} disabled={submitting}>
+          {submitting ? <ActivityIndicator color="#ffffff" /> : <Text style={styles.primaryButtonText}>Request tow</Text>}
         </Pressable>
       </ScrollView>
     </SafeAreaView>

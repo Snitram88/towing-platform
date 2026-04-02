@@ -1,19 +1,17 @@
+import 'react-native-gesture-handler';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, StatusBar, StyleSheet, View } from 'react-native';
 import { NavigationContainer, DarkTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import type { Session } from '@supabase/supabase-js';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { supabase } from './src/lib/supabase';
 import WelcomeScreen from './src/screens/WelcomeScreen';
 import SignInScreen from './src/screens/SignInScreen';
 import SignUpScreen from './src/screens/SignUpScreen';
 import HomeScreen from './src/screens/HomeScreen';
-import BookingLocationScreen from './src/screens/BookingLocationScreen';
-import MapPickerScreen from './src/screens/MapPickerScreen';
-import BookingVehicleScreen from './src/screens/BookingVehicleScreen';
-import BookingSummaryScreen from './src/screens/BookingSummaryScreen';
-import TrackingDemoScreen from './src/screens/TrackingDemoScreen';
+import HistoryScreen from './src/screens/HistoryScreen';
 
 const Stack = createNativeStackNavigator<any>();
 
@@ -67,37 +65,37 @@ export default function App() {
 
   if (booting) {
     return (
-      <SafeAreaProvider>
-        <View style={styles.bootScreen}>
-          <StatusBar barStyle="light-content" backgroundColor="#06111F" />
-          <ActivityIndicator color="#ffffff" size="large" />
-        </View>
-      </SafeAreaProvider>
+      <GestureHandlerRootView style={{ flex: 1 }}>
+        <SafeAreaProvider>
+          <View style={styles.bootScreen}>
+            <StatusBar barStyle="light-content" backgroundColor="#06111F" />
+            <ActivityIndicator color="#ffffff" size="large" />
+          </View>
+        </SafeAreaProvider>
+      </GestureHandlerRootView>
     );
   }
 
   return (
-    <SafeAreaProvider>
-      <StatusBar barStyle="light-content" backgroundColor="#06111F" />
-      <NavigationContainer theme={navTheme}>
-        {session ? (
-          <Stack.Navigator screenOptions={screenOptions}>
-            <Stack.Screen name="Home" component={HomeScreen} />
-            <Stack.Screen name="BookingLocation" component={BookingLocationScreen} />
-            <Stack.Screen name="MapPicker" component={MapPickerScreen} />
-            <Stack.Screen name="BookingVehicle" component={BookingVehicleScreen} />
-            <Stack.Screen name="BookingSummary" component={BookingSummaryScreen} />
-            <Stack.Screen name="TrackingDemo" component={TrackingDemoScreen} />
-          </Stack.Navigator>
-        ) : (
-          <Stack.Navigator initialRouteName="Welcome" screenOptions={screenOptions}>
-            <Stack.Screen name="Welcome" component={WelcomeScreen} />
-            <Stack.Screen name="SignIn" component={SignInScreen} />
-            <Stack.Screen name="SignUp" component={SignUpScreen} />
-          </Stack.Navigator>
-        )}
-      </NavigationContainer>
-    </SafeAreaProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <StatusBar barStyle="light-content" backgroundColor="#06111F" />
+        <NavigationContainer theme={navTheme}>
+          {session ? (
+            <Stack.Navigator screenOptions={screenOptions}>
+              <Stack.Screen name="Home" component={HomeScreen} />
+              <Stack.Screen name="History" component={HistoryScreen} />
+            </Stack.Navigator>
+          ) : (
+            <Stack.Navigator initialRouteName="Welcome" screenOptions={screenOptions}>
+              <Stack.Screen name="Welcome" component={WelcomeScreen} />
+              <Stack.Screen name="SignIn" component={SignInScreen} />
+              <Stack.Screen name="SignUp" component={SignUpScreen} />
+            </Stack.Navigator>
+          )}
+        </NavigationContainer>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
 
