@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/admin';
 type DriverRow = {
   profile_id: string;
   verification_status: string;
+  documents_status: string;
   verified_badge: boolean;
   is_online: boolean;
   is_available: boolean;
@@ -36,6 +37,9 @@ type VehicleTypeRow = {
   name: string;
 };
 
+let lastGoodPayload: any = null;
+let lastGoodAt: string | null = null;
+
 export async function GET() {
   try {
     const supabase = createAdminClient();
@@ -43,7 +47,7 @@ export async function GET() {
     const [driversRes, bookingsRes, profilesRes, vehicleTypesRes] = await Promise.all([
       supabase
         .from('drivers')
-        .select('profile_id, verification_status, verified_badge, is_online, is_available, created_at')
+        .select('profile_id, verification_status, documents_status, verified_badge, is_online, is_available, created_at')
         .order('created_at', { ascending: false }),
       supabase
         .from('bookings')
@@ -51,7 +55,7 @@ export async function GET() {
           'id, customer_id, driver_id, vehicle_type_id, booking_status, payment_status, quoted_amount, pickup_address, drop_address, created_at'
         )
         .order('created_at', { ascending: false })
-        .limit(100),
+        .limit(300),
       supabase
         .from('profiles')
         .select('id, full_name, email, phone, role')
@@ -75,29 +79,27 @@ export async function GET() {
     const profileMap = Object.fromEntries(profiles.map((profile) => [profile.id, profile]));
     const vehicleTypeMap = Object.fromEntries(vehicleTypes.map((item) => [item.id, item.name]));
 
-    const pendingDrivers = drivers
-      .filter((driver) => driver.verification_status === 'pending' || driver.verification_status === 'rejected')
-      .map((driver) => {
-        const profile = profileMap[driver.profile_id];
-        return {
-          ...driver,
-          full_name: profile?.full_name ?? 'Unknown driver',
-          email: profile?.email ?? null,
-          phone: profile?.phone ?? null,
-        };
-      });
+    const decoratedDrivers = drivers.map((driver) => {
+      const profile = profileMap[driver.profile_id];
+      return {
+        ...driver,
+        full_name: profile?.full_name ?? 'Unknown driver',
+        email: profile?.email ?? null,
+        phone: profile?.phone ?? null,
+      };
+    });
 
-    const approvedDrivers = drivers
-      .filter((driver) => driver.verification_status === 'approved')
-      .map((driver) => {
-        const profile = profileMap[driver.profile_id];
-        return {
-          ...driver,
-          full_name: profile?.full_name ?? 'Approved driver',
-          email: profile?.email ?? null,
-          phone: profile?.phone ?? null,
-        };
-      });
+    const pendingDrivers = decoratedDrivers.filter(
+      (driver) =>
+        driver.verification_status !== 'approved' ||
+        driver.documents_status !== 'approved'
+    );
+
+    const approvedDrivers = decoratedDrivers.filter(
+      (driver) =>
+        driver.verification_status === 'approved' &&
+        driver.documents_status === 'approved'
+    );
 
     const enrichedBookings = bookings.map((booking) => {
       const customer = profileMap[booking.customer_id];
@@ -122,14 +124,31 @@ export async function GET() {
       completedBookings: enrichedBookings.filter((item) => item.booking_status === 'completed').length,
     };
 
-    return NextResponse.json({
+    const payload = {
       metrics,
       pendingDrivers,
       approvedDrivers,
       bookings: enrichedBookings,
-    });
+      stale: false,
+      fetchedAt: new Date().toISOString(),
+      cachedAt: null,
+    };
+
+    lastGoodPayload = payload;
+    lastGoodAt = payload.fetchedAt;
+
+    return NextResponse.json(payload);
   } catch (error) {
     console.error('Dashboard load failed:', error);
+
+    if (lastGoodPayload) {
+      return NextResponse.json({
+        ...lastGoodPayload,
+        stale: true,
+        cachedAt: lastGoodAt,
+      });
+    }
+
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Dashboard load failed' },
       { status: 500 }

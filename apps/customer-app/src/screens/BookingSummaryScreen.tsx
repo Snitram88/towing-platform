@@ -95,7 +95,28 @@ export default function BookingSummaryScreen({ navigation, route }: Props) {
       note: 'Customer created booking from mobile app',
     });
 
+    const { data: dispatchResult, error: dispatchError } = await supabase.rpc('dispatch_booking', {
+      p_booking_id: bookingRow.id,
+    });
+
     setSubmitting(false);
+
+    if (dispatchError) {
+      Alert.alert(
+        'Booking created',
+        'Your booking was created, but auto-dispatch could not start yet. Admin can still intervene.'
+      );
+    } else if ((dispatchResult?.offered_count ?? 0) === 0) {
+      Alert.alert(
+        'Booking created',
+        'No approved online drivers were available right now. Your booking stays active while the system keeps searching.'
+      );
+    } else {
+      Alert.alert(
+        'Booking created',
+        `Dispatch started and ${dispatchResult.offered_count} driver offer(s) were sent.`
+      );
+    }
 
     navigation.navigate('TrackingDemo', {
       bookingId: bookingRow.id,

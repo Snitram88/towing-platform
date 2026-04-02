@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 type MetricSet = {
   totalBookings: number;
@@ -10,9 +10,10 @@ type MetricSet = {
   completedBookings: number;
 };
 
-type PendingDriver = {
+type Driver = {
   profile_id: string;
   verification_status: string;
+  documents_status: string;
   verified_badge: boolean;
   is_online: boolean;
   is_available: boolean;
@@ -20,8 +21,6 @@ type PendingDriver = {
   email: string | null;
   phone: string | null;
 };
-
-type ApprovedDriver = PendingDriver;
 
 type Booking = {
   id: string;
@@ -40,10 +39,21 @@ type Booking = {
 
 type DashboardPayload = {
   metrics: MetricSet;
-  pendingDrivers: PendingDriver[];
-  approvedDrivers: ApprovedDriver[];
+  pendingDrivers: Driver[];
+  approvedDrivers: Driver[];
   bookings: Booking[];
+  stale?: boolean;
+  fetchedAt?: string | null;
+  cachedAt?: string | null;
 };
+
+const ACTIVE_STATUSES = [
+  'searching_driver',
+  'driver_assigned',
+  'driver_en_route',
+  'driver_arrived',
+  'in_service',
+];
 
 const pageWrap: React.CSSProperties = {
   minHeight: '100vh',
@@ -56,7 +66,7 @@ const pageWrap: React.CSSProperties = {
 };
 
 const container: React.CSSProperties = {
-  maxWidth: 1280,
+  maxWidth: 1440,
   margin: '0 auto',
 };
 
@@ -71,7 +81,7 @@ const heroCard: React.CSSProperties = {
 
 const metricGrid: React.CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
   gap: 16,
   marginTop: 22,
 };
@@ -92,34 +102,9 @@ const whiteCard: React.CSSProperties = {
 
 const cardGrid: React.CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: '1.1fr 1.6fr',
+  gridTemplateColumns: '1fr 1fr',
   gap: 18,
   alignItems: 'start',
-};
-
-const tableWrap: React.CSSProperties = {
-  overflowX: 'auto',
-};
-
-const tableStyle: React.CSSProperties = {
-  width: '100%',
-  borderCollapse: 'collapse',
-};
-
-const thStyle: React.CSSProperties = {
-  textAlign: 'left',
-  fontSize: 12,
-  textTransform: 'uppercase',
-  letterSpacing: 0.8,
-  color: '#64748b',
-  padding: '0 0 14px',
-  borderBottom: '1px solid #e2e8f0',
-};
-
-const tdStyle: React.CSSProperties = {
-  padding: '14px 0',
-  borderBottom: '1px solid #f1f5f9',
-  verticalAlign: 'top',
 };
 
 const actionButton = (background: string, color = '#ffffff'): React.CSSProperties => ({
@@ -132,79 +117,129 @@ const actionButton = (background: string, color = '#ffffff'): React.CSSPropertie
   color,
 });
 
-const subtleButton: React.CSSProperties = {
-  ...actionButton('#eff6ff', '#1d4ed8'),
-};
-
-const sectionTitle: React.CSSProperties = {
-  margin: 0,
-  fontSize: 22,
-  fontWeight: 800,
-  color: '#0f172a',
-};
-
-const muted: React.CSSProperties = {
-  color: '#64748b',
-  fontSize: 14,
-};
-
-const chipStyle = (bg: string, color: string): React.CSSProperties => ({
-  display: 'inline-flex',
-  alignItems: 'center',
-  borderRadius: 999,
-  padding: '8px 12px',
-  fontWeight: 800,
-  fontSize: 12,
-  background: bg,
-  color,
-});
+function chip(bg: string, color: string): React.CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    borderRadius: 999,
+    padding: '8px 12px',
+    fontWeight: 800,
+    fontSize: 12,
+    background: bg,
+    color,
+  };
+}
 
 function bookingStatusChip(status: string) {
   switch (status) {
     case 'completed':
-      return chipStyle('#dcfce7', '#166534');
+      return chip('#dcfce7', '#166534');
     case 'driver_en_route':
     case 'driver_arrived':
     case 'in_service':
-      return chipStyle('#dbeafe', '#1d4ed8');
+      return chip('#dbeafe', '#1d4ed8');
     case 'driver_assigned':
     case 'searching_driver':
-      return chipStyle('#fef3c7', '#b45309');
+      return chip('#fef3c7', '#b45309');
     case 'canceled_by_admin':
-      return chipStyle('#fee2e2', '#b91c1c');
+    case 'canceled_by_driver':
+    case 'canceled_by_customer':
+      return chip('#fee2e2', '#b91c1c');
     default:
-      return chipStyle('#e2e8f0', '#334155');
+      return chip('#e2e8f0', '#334155');
   }
+}
+
+function onlineChip(isOnline: boolean, isAvailable: boolean) {
+  if (isOnline && isAvailable) return chip('#dcfce7', '#166534');
+  if (isOnline && !isAvailable) return chip('#dbeafe', '#1d4ed8');
+  return chip('#e2e8f0', '#334155');
+}
+
+function onlineLabel(isOnline: boolean, isAvailable: boolean) {
+  if (isOnline && isAvailable) return 'Online • Available';
+  if (isOnline && !isAvailable) return 'Online • Busy';
+  return 'Offline';
 }
 
 function titleize(value: string) {
   return value.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+function bookingMatchesQuery(booking: Booking, query: string) {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+
+  return [
+    booking.customer_name,
+    booking.driver_name || '',
+    booking.pickup_address,
+    booking.drop_address,
+    booking.vehicle_type_name,
+    booking.booking_status,
+  ]
+    .join(' ')
+    .toLowerCase()
+    .includes(q);
+}
+
+function connectionChip(stale: boolean, failedRefreshCount: number) {
+  if (failedRefreshCount > 0 && stale) return chip('#fef3c7', '#b45309');
+  if (failedRefreshCount > 0) return chip('#fee2e2', '#b91c1c');
+  return chip('#dcfce7', '#166534');
+}
+
+function connectionLabel(stale: boolean, failedRefreshCount: number) {
+  if (failedRefreshCount > 0 && stale) return 'Using cached snapshot';
+  if (failedRefreshCount > 0) return 'Connection unstable';
+  return 'Live connection healthy';
+}
+
 export default function Page() {
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [archiveQuery, setArchiveQuery] = useState('');
+  const [failedRefreshCount, setFailedRefreshCount] = useState(0);
+  const inFlightRef = useRef(false);
 
-  const loadDashboard = async () => {
-    setLoading(true);
-    const response = await fetch('/api/admin/dashboard', { cache: 'no-store' });
-    const json = await response.json();
+  const loadDashboard = async (silent = false) => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
 
-    if (!response.ok) {
-      throw new Error(json.error || 'Dashboard load failed');
+    try {
+      const response = await fetch('/api/admin/dashboard', { cache: 'no-store' });
+      const json = await response.json();
+
+      if (!response.ok) {
+        throw new Error(json.error || 'Dashboard load failed');
+      }
+
+      setData(json);
+      setFailedRefreshCount(0);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log('[admin-dashboard-refresh]', message);
+
+      setFailedRefreshCount((count) => count + 1);
+
+      if (!silent && !data) {
+        alert(message);
+      }
+    } finally {
+      inFlightRef.current = false;
+      setLoading(false);
     }
-
-    setData(json);
-    setLoading(false);
   };
 
   useEffect(() => {
-    loadDashboard().catch((error) => {
-      console.error(error);
-      setLoading(false);
-      alert(error.message || 'Dashboard load failed');
-    });
+    void loadDashboard(false);
+
+    const interval = setInterval(() => {
+      void loadDashboard(true);
+    }, 15000);
+
+    return () => clearInterval(interval);
   }, []);
 
   const metrics = useMemo(
@@ -219,15 +254,27 @@ export default function Page() {
     [data]
   );
 
+  const activeBookings = useMemo(
+    () => (data?.bookings ?? []).filter((booking) => ACTIVE_STATUSES.includes(booking.booking_status)),
+    [data]
+  );
+
+  const archiveBookings = useMemo(
+    () =>
+      (data?.bookings ?? []).filter(
+        (booking) =>
+          !ACTIVE_STATUSES.includes(booking.booking_status) && bookingMatchesQuery(booking, archiveQuery)
+      ),
+    [data, archiveQuery]
+  );
+
   const runAction = async (key: string, url: string, body: Record<string, unknown>) => {
     try {
       setBusyKey(key);
 
       const response = await fetch(url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
 
@@ -237,14 +284,15 @@ export default function Page() {
         throw new Error(json.error || 'Action failed');
       }
 
-      await loadDashboard();
+      await loadDashboard(true);
     } catch (error) {
-      console.error(error);
       alert(error instanceof Error ? error.message : 'Action failed');
     } finally {
       setBusyKey(null);
     }
   };
+
+  const stale = Boolean(data?.stale);
 
   return (
     <main style={pageWrap}>
@@ -272,268 +320,127 @@ export default function Page() {
               <h1 style={{ margin: 0, fontSize: 38, lineHeight: 1.05, fontWeight: 900 }}>
                 Admin dashboard, driver approval, and live booking control.
               </h1>
-              <p style={{ marginTop: 12, marginBottom: 0, color: '#dbeafe', maxWidth: 720, lineHeight: 1.6 }}>
-                This is the real ops control center for the towing platform. Approve drivers, assign bookings,
-                and move jobs through their service lifecycle.
+              <p style={{ marginTop: 12, marginBottom: 0, color: '#dbeafe', maxWidth: 760, lineHeight: 1.6 }}>
+                Auto-refreshes every 15 seconds with cached fallback when the network to Supabase is unstable.
               </p>
             </div>
 
-            <div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <span style={connectionChip(stale, failedRefreshCount)}>
+                {connectionLabel(stale, failedRefreshCount)}
+              </span>
+
               <button
-                onClick={() => loadDashboard().catch((error) => alert(error.message))}
+                onClick={() => void loadDashboard(false)}
                 style={actionButton('#ffffff', '#0f172a')}
               >
-                Refresh dashboard
+                Refresh now
               </button>
             </div>
           </div>
 
           <div style={metricGrid}>
-            <div style={metricCard}>
-              <div style={{ color: '#dbeafe', fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Total bookings</div>
-              <div style={{ fontSize: 34, fontWeight: 900 }}>{metrics.totalBookings}</div>
-            </div>
-            <div style={metricCard}>
-              <div style={{ color: '#dbeafe', fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Pending drivers</div>
-              <div style={{ fontSize: 34, fontWeight: 900 }}>{metrics.pendingDrivers}</div>
-            </div>
-            <div style={metricCard}>
-              <div style={{ color: '#dbeafe', fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Approved drivers</div>
-              <div style={{ fontSize: 34, fontWeight: 900 }}>{metrics.approvedDrivers}</div>
-            </div>
-            <div style={metricCard}>
-              <div style={{ color: '#dbeafe', fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Active jobs</div>
-              <div style={{ fontSize: 34, fontWeight: 900 }}>{metrics.activeBookings}</div>
-            </div>
-            <div style={metricCard}>
-              <div style={{ color: '#dbeafe', fontSize: 13, fontWeight: 700, marginBottom: 8 }}>Completed jobs</div>
-              <div style={{ fontSize: 34, fontWeight: 900 }}>{metrics.completedBookings}</div>
-            </div>
+            <div style={metricCard}><div>Total bookings</div><div style={{ fontSize: 34, fontWeight: 900 }}>{metrics.totalBookings}</div></div>
+            <div style={metricCard}><div>Pending drivers</div><div style={{ fontSize: 34, fontWeight: 900 }}>{metrics.pendingDrivers}</div></div>
+            <div style={metricCard}><div>Approved drivers</div><div style={{ fontSize: 34, fontWeight: 900 }}>{metrics.approvedDrivers}</div></div>
+            <div style={metricCard}><div>Active jobs</div><div style={{ fontSize: 34, fontWeight: 900 }}>{metrics.activeBookings}</div></div>
+            <div style={metricCard}><div>Completed jobs</div><div style={{ fontSize: 34, fontWeight: 900 }}>{metrics.completedBookings}</div></div>
           </div>
         </section>
 
         <div style={cardGrid}>
           <section style={whiteCard}>
-            <div style={{ marginBottom: 18 }}>
-              <h2 style={sectionTitle}>Driver approvals</h2>
-              <p style={muted}>Approve or reject pending drivers before they can receive live towing assignments.</p>
-            </div>
+            <h2 style={{ marginTop: 0 }}>Driver approvals</h2>
+            <p style={{ color: '#64748b' }}>
+              A driver is fully approved only when both account approval and document approval are complete.
+            </p>
 
             {loading ? (
-              <p style={muted}>Loading drivers...</p>
+              <p>Loading...</p>
             ) : !data || data.pendingDrivers.length === 0 ? (
-              <p style={muted}>No pending or rejected drivers right now.</p>
+              <p style={{ color: '#64748b' }}>No pending drivers right now.</p>
             ) : (
-              <div style={tableWrap}>
-                <table style={tableStyle}>
-                  <thead>
-                    <tr>
-                      <th style={thStyle}>Driver</th>
-                      <th style={thStyle}>Contact</th>
-                      <th style={thStyle}>Status</th>
-                      <th style={thStyle}>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.pendingDrivers.map((driver) => (
-                      <tr key={driver.profile_id}>
-                        <td style={tdStyle}>
-                          <div style={{ fontWeight: 800, color: '#0f172a' }}>{driver.full_name}</div>
-                          <div style={muted}>Profile ID: {driver.profile_id.slice(0, 8)}...</div>
-                        </td>
-                        <td style={tdStyle}>
-                          <div>{driver.email || 'No email'}</div>
-                          <div style={muted}>{driver.phone || 'No phone'}</div>
-                        </td>
-                        <td style={tdStyle}>
-                          <span style={bookingStatusChip(driver.verification_status)}>
-                            {titleize(driver.verification_status)}
-                          </span>
-                        </td>
-                        <td style={tdStyle}>
-                          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                            <button
-                              style={actionButton('#16a34a')}
-                              disabled={busyKey === `approve-${driver.profile_id}`}
-                              onClick={() =>
-                                runAction(
-                                  `approve-${driver.profile_id}`,
-                                  '/api/admin/drivers/decision',
-                                  { profileId: driver.profile_id, decision: 'approved' }
-                                )
-                              }
-                            >
-                              Approve
-                            </button>
-                            <button
-                              style={actionButton('#ef4444')}
-                              disabled={busyKey === `reject-${driver.profile_id}`}
-                              onClick={() =>
-                                runAction(
-                                  `reject-${driver.profile_id}`,
-                                  '/api/admin/drivers/decision',
-                                  { profileId: driver.profile_id, decision: 'rejected' }
-                                )
-                              }
-                            >
-                              Reject
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div style={{ display: 'grid', gap: 12 }}>
+                {data.pendingDrivers.map((driver) => {
+                  const needsAccountApproval = driver.verification_status !== 'approved';
+                  const needsDocsApproval = driver.documents_status !== 'approved';
+
+                  return (
+                    <div key={driver.profile_id} style={{ border: '1px solid #e2e8f0', borderRadius: 18, padding: 16 }}>
+                      <div style={{ fontWeight: 800, marginBottom: 4 }}>{driver.full_name}</div>
+                      <div style={{ color: '#64748b', marginBottom: 10 }}>{driver.email || 'No email'}</div>
+
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+                        <span style={chip('#fef3c7', '#b45309')}>
+                          Account: {titleize(driver.verification_status)}
+                        </span>
+                        <span style={chip('#ede9fe', '#6d28d9')}>
+                          Docs: {titleize(driver.documents_status)}
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                        {needsAccountApproval ? (
+                          <button
+                            style={actionButton('#16a34a')}
+                            disabled={busyKey === `approve-account-${driver.profile_id}`}
+                            onClick={() =>
+                              runAction(
+                                `approve-account-${driver.profile_id}`,
+                                '/api/admin/drivers/decision',
+                                { profileId: driver.profile_id, decision: 'approved' }
+                              )
+                            }
+                          >
+                            Approve account
+                          </button>
+                        ) : null}
+
+                        {needsDocsApproval ? (
+                          <button
+                            style={actionButton('#7c3aed')}
+                            disabled={busyKey === `approve-docs-${driver.profile_id}`}
+                            onClick={() =>
+                              runAction(
+                                `approve-docs-${driver.profile_id}`,
+                                '/api/admin/drivers/documents-decision',
+                                { profileId: driver.profile_id, decision: 'approved' }
+                              )
+                            }
+                          >
+                            Approve docs
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </section>
 
           <section style={whiteCard}>
-            <div style={{ marginBottom: 18 }}>
-              <h2 style={sectionTitle}>Bookings operations</h2>
-              <p style={muted}>Assign approved drivers and move jobs through operational statuses.</p>
-            </div>
+            <h2 style={{ marginTop: 0 }}>Approved drivers live board</h2>
+            <p style={{ color: '#64748b' }}>
+              This panel reflects who is online, offline, available, or busy.
+            </p>
 
             {loading ? (
-              <p style={muted}>Loading bookings...</p>
-            ) : !data || data.bookings.length === 0 ? (
-              <p style={muted}>No bookings found yet.</p>
+              <p>Loading...</p>
+            ) : !data || data.approvedDrivers.length === 0 ? (
+              <p style={{ color: '#64748b' }}>No fully approved drivers yet.</p>
             ) : (
-              <div style={{ display: 'grid', gap: 14 }}>
-                {data.bookings.map((booking) => (
-                  <div
-                    key={booking.id}
-                    style={{
-                      border: '1px solid #e2e8f0',
-                      borderRadius: 20,
-                      padding: 18,
-                      background: '#fcfdff',
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        gap: 16,
-                        alignItems: 'flex-start',
-                        flexWrap: 'wrap',
-                        marginBottom: 14,
-                      }}
-                    >
+              <div style={{ display: 'grid', gap: 12 }}>
+                {data.approvedDrivers.map((driver) => (
+                  <div key={driver.profile_id} style={{ border: '1px solid #e2e8f0', borderRadius: 18, padding: 16 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
                       <div>
-                        <div style={{ fontSize: 18, fontWeight: 900, color: '#0f172a', marginBottom: 4 }}>
-                          {booking.vehicle_type_name}
-                        </div>
-                        <div style={muted}>
-                          {booking.customer_name} • {new Date(booking.created_at).toLocaleString()}
-                        </div>
+                        <div style={{ fontWeight: 800, marginBottom: 4 }}>{driver.full_name}</div>
+                        <div style={{ color: '#64748b' }}>{driver.email || 'No email'}</div>
                       </div>
-
-                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                        <span style={bookingStatusChip(booking.booking_status)}>
-                          {titleize(booking.booking_status)}
-                        </span>
-                        <span style={chipStyle('#eff6ff', '#1d4ed8')}>
-                          ${Number(booking.quoted_amount).toFixed(2)}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div style={{ marginBottom: 12 }}>
-                      <div style={{ fontSize: 12, textTransform: 'uppercase', color: '#64748b', fontWeight: 800, marginBottom: 4 }}>
-                        Pickup
-                      </div>
-                      <div style={{ fontWeight: 700, color: '#0f172a', marginBottom: 10 }}>{booking.pickup_address}</div>
-
-                      <div style={{ fontSize: 12, textTransform: 'uppercase', color: '#64748b', fontWeight: 800, marginBottom: 4 }}>
-                        Dropoff
-                      </div>
-                      <div style={{ fontWeight: 700, color: '#0f172a' }}>{booking.drop_address}</div>
-                    </div>
-
-                    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
-                      <div style={chipStyle('#f8fafc', '#334155')}>
-                        Customer: {booking.customer_name}
-                      </div>
-                      <div style={chipStyle('#f8fafc', '#334155')}>
-                        Driver: {booking.driver_name || 'Unassigned'}
-                      </div>
-                      <div style={chipStyle('#f8fafc', '#334155')}>
-                        Payment: {titleize(booking.payment_status)}
-                      </div>
-                    </div>
-
-                    <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                      <select
-                        defaultValue=""
-                        style={{
-                          minWidth: 240,
-                          borderRadius: 14,
-                          border: '1px solid #cbd5e1',
-                          padding: '12px 14px',
-                          fontWeight: 700,
-                          color: '#0f172a',
-                          background: '#ffffff',
-                        }}
-                        onChange={(event) => {
-                          const driverId = event.target.value;
-                          if (!driverId) return;
-
-                          runAction(
-                            `assign-${booking.id}`,
-                            '/api/admin/bookings/assign',
-                            { bookingId: booking.id, driverId }
-                          );
-                        }}
-                      >
-                        <option value="">Assign approved driver</option>
-                        {data.approvedDrivers
-                          .filter((driver) => driver.is_available)
-                          .map((driver) => (
-                            <option key={driver.profile_id} value={driver.profile_id}>
-                              {driver.full_name} {driver.is_online ? '• online' : '• offline'}
-                            </option>
-                          ))}
-                      </select>
-
-                      <select
-                        defaultValue=""
-                        style={{
-                          minWidth: 220,
-                          borderRadius: 14,
-                          border: '1px solid #cbd5e1',
-                          padding: '12px 14px',
-                          fontWeight: 700,
-                          color: '#0f172a',
-                          background: '#ffffff',
-                        }}
-                        onChange={(event) => {
-                          const status = event.target.value;
-                          if (!status) return;
-
-                          runAction(
-                            `status-${booking.id}`,
-                            '/api/admin/bookings/status',
-                            { bookingId: booking.id, status }
-                          );
-                        }}
-                      >
-                        <option value="">Change booking status</option>
-                        <option value="searching_driver">Searching driver</option>
-                        <option value="driver_assigned">Driver assigned</option>
-                        <option value="driver_en_route">Driver en route</option>
-                        <option value="driver_arrived">Driver arrived</option>
-                        <option value="in_service">In service</option>
-                        <option value="completed">Completed</option>
-                        <option value="canceled_by_admin">Canceled by admin</option>
-                      </select>
-
-                      <button
-                        style={subtleButton}
-                        onClick={() => loadDashboard().catch((error) => alert(error.message))}
-                      >
-                        Refresh row
-                      </button>
+                      <span style={onlineChip(driver.is_online, driver.is_available)}>
+                        {onlineLabel(driver.is_online, driver.is_available)}
+                      </span>
                     </div>
                   </div>
                 ))}
@@ -541,6 +448,161 @@ export default function Page() {
             )}
           </section>
         </div>
+
+        <section style={{ ...whiteCard, marginTop: 18 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 18 }}>
+            <div>
+              <h2 style={{ marginTop: 0, marginBottom: 6 }}>Active bookings board</h2>
+              <p style={{ color: '#64748b', margin: 0 }}>
+                Compact operations cards for live jobs. This is the board your team will watch most.
+              </p>
+            </div>
+
+            <div style={chip('#dbeafe', '#1d4ed8')}>
+              {activeBookings.length} active booking(s)
+            </div>
+          </div>
+
+          {loading ? (
+            <p>Loading...</p>
+          ) : activeBookings.length === 0 ? (
+            <p style={{ color: '#64748b' }}>No active bookings right now.</p>
+          ) : (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))',
+                gap: 16,
+              }}
+            >
+              {activeBookings.map((booking) => (
+                <div
+                  key={booking.id}
+                  style={{
+                    border: '1px solid #e2e8f0',
+                    borderRadius: 22,
+                    padding: 18,
+                    background: '#fcfdff',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
+                    <div>
+                      <div style={{ fontSize: 20, fontWeight: 900 }}>{booking.vehicle_type_name}</div>
+                      <div style={{ color: '#64748b' }}>
+                        {booking.customer_name} • {new Date(booking.created_at).toLocaleString()}
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <span style={bookingStatusChip(booking.booking_status)}>
+                        {titleize(booking.booking_status)}
+                      </span>
+                      <span style={chip('#eff6ff', '#1d4ed8')}>
+                        ${Number(booking.quoted_amount).toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 12, textTransform: 'uppercase', color: '#64748b', fontWeight: 800, marginBottom: 4 }}>
+                      Pickup
+                    </div>
+                    <div style={{ fontWeight: 700, lineHeight: 1.5 }}>{booking.pickup_address}</div>
+                  </div>
+
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 12, textTransform: 'uppercase', color: '#64748b', fontWeight: 800, marginBottom: 4 }}>
+                      Dropoff
+                    </div>
+                    <div style={{ fontWeight: 700, lineHeight: 1.5 }}>{booking.drop_address}</div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <div style={chip('#f8fafc', '#334155')}>Customer: {booking.customer_name}</div>
+                    <div style={chip('#f8fafc', '#334155')}>Driver: {booking.driver_name || 'Unassigned'}</div>
+                    <div style={chip('#f8fafc', '#334155')}>Payment: {titleize(booking.payment_status)}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section style={{ ...whiteCard, marginTop: 18 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end', marginBottom: 18 }}>
+            <div>
+              <h2 style={{ marginTop: 0, marginBottom: 6 }}>Booking repository</h2>
+              <p style={{ color: '#64748b', margin: 0 }}>
+                Search through completed, cancelled, and inactive records.
+              </p>
+            </div>
+
+            <input
+              value={archiveQuery}
+              onChange={(event) => setArchiveQuery(event.target.value)}
+              placeholder="Search customer, driver, address, vehicle, status..."
+              style={{
+                minWidth: 340,
+                maxWidth: 420,
+                borderRadius: 14,
+                border: '1px solid #cbd5e1',
+                padding: '12px 14px',
+                fontSize: 14,
+                fontWeight: 600,
+                outline: 'none',
+              }}
+            />
+          </div>
+
+          {loading ? (
+            <p>Loading...</p>
+          ) : archiveBookings.length === 0 ? (
+            <p style={{ color: '#64748b' }}>No repository records match your search.</p>
+          ) : (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+                gap: 14,
+              }}
+            >
+              {archiveBookings.map((booking) => (
+                <div
+                  key={booking.id}
+                  style={{
+                    border: '1px solid #e2e8f0',
+                    borderRadius: 18,
+                    padding: 16,
+                    background: '#ffffff',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+                    <div style={{ fontWeight: 800 }}>{booking.vehicle_type_name}</div>
+                    <span style={bookingStatusChip(booking.booking_status)}>
+                      {titleize(booking.booking_status)}
+                    </span>
+                  </div>
+
+                  <div style={{ color: '#64748b', fontSize: 13, marginBottom: 10 }}>
+                    {booking.customer_name} • {new Date(booking.created_at).toLocaleString()}
+                  </div>
+
+                  <div style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 10 }}>
+                    <strong>Pickup:</strong> {booking.pickup_address}
+                  </div>
+                  <div style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>
+                    <strong>Dropoff:</strong> {booking.drop_address}
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <div style={chip('#f8fafc', '#334155')}>Driver: {booking.driver_name || 'Unassigned'}</div>
+                    <div style={chip('#eff6ff', '#1d4ed8')}>${Number(booking.quoted_amount).toFixed(2)}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       </div>
     </main>
   );

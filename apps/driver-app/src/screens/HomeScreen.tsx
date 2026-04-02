@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -10,195 +10,64 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../lib/supabase';
-import type { DriverState } from '../types/app';
+import { LocationSyncStatus, startDriverLocationSync } from '../lib/locationSync';
 
-type VehicleType = {
-  id: string;
-  name: string;
-  tonnage_min: number;
-  tonnage_max: number;
+type DriverInfo = {
+  profile_id: string;
+  verification_status?: string | null;
+  documents_status?: string | null;
+  is_online?: boolean | null;
+  is_available?: boolean | null;
+  verified_badge?: boolean | null;
+  full_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+};
+
+type PendingOffer = {
+  offer_id: string;
+  booking_id: string;
+  vehicle_type_name?: string | null;
+  quoted_amount?: number | null;
+  pickup_address?: string | null;
+  pickup_lat?: number | null;
+  pickup_lng?: number | null;
+  drop_address?: string | null;
+  drop_lat?: number | null;
+  drop_lng?: number | null;
+  customer_name?: string | null;
+  customer_phone?: string | null;
+  created_at?: string | null;
+  expires_at?: string | null;
+};
+
+type ActiveBooking = {
+  booking_id: string;
+  booking_status?: string | null;
+  pickup_address?: string | null;
+  pickup_lat?: number | null;
+  pickup_lng?: number | null;
+  drop_address?: string | null;
+  drop_lat?: number | null;
+  drop_lng?: number | null;
+  quoted_amount?: number | null;
+  vehicle_type_name?: string | null;
+  customer_name?: string | null;
+  customer_phone?: string | null;
+  created_at?: string | null;
+};
+
+type DispatchState = {
+  driver: DriverInfo | null;
+  pending_offers: PendingOffer[];
+  active_booking: ActiveBooking | null;
 };
 
 type Props = {
-  driver: DriverState;
-  onRefresh: () => Promise<void>;
-  onSignOut: () => Promise<void>;
+  navigation: any;
 };
-
-export default function HomeScreen({ driver, onRefresh, onSignOut }: Props) {
-  const [vehicleTypes, setVehicleTypes] = useState<VehicleType[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [isOnline, setIsOnline] = useState(driver.is_online);
-
-  const loadHome = async () => {
-    setLoading(true);
-
-    const { data, error } = await supabase
-      .from('vehicle_types')
-      .select('id, name, tonnage_min, tonnage_max')
-      .eq('is_active', true)
-      .order('display_order', { ascending: true });
-
-    if (error) {
-      Alert.alert('Load failed', error.message);
-      setVehicleTypes([]);
-    } else {
-      setVehicleTypes((data ?? []) as VehicleType[]);
-    }
-
-    setLoading(false);
-  };
-
-  useEffect(() => {
-    setIsOnline(driver.is_online);
-  }, [driver.is_online]);
-
-  useEffect(() => {
-    loadHome();
-  }, []);
-
-  const toggleAvailability = async () => {
-    const nextValue = !isOnline;
-    setIsOnline(nextValue);
-
-    const { error } = await supabase
-      .from('drivers')
-      .update({
-        is_online: nextValue,
-        is_available: nextValue,
-      })
-      .eq('profile_id', driver.profile_id);
-
-    if (error) {
-      setIsOnline(!nextValue);
-      Alert.alert('Update failed', error.message);
-      return;
-    }
-
-    await onRefresh();
-  };
-
-  return (
-    <SafeAreaView style={styles.safeArea}>
-      <ScrollView
-        contentContainerStyle={styles.container}
-        showsVerticalScrollIndicator={false}
-        refreshControl={<RefreshControl refreshing={loading} onRefresh={async () => {
-          await Promise.all([loadHome(), onRefresh()]);
-        }} tintColor="#ffffff" />}
-      >
-        <LinearGradient colors={isOnline ? ['#052e16', '#14532d', '#166534'] : ['#111827', '#0f172a', '#1e293b']} style={styles.hero}>
-          <View style={styles.heroTopRow}>
-            <View>
-              <Text style={styles.heroEyebrow}>Verified driver workspace</Text>
-              <Text style={styles.heroTitle}>Hi, {driver.full_name?.split(' ')[0] || 'Driver'}</Text>
-              <Text style={styles.heroSubtitle}>
-                Manage live availability, incoming requests, and premium towing operations.
-              </Text>
-            </View>
-
-            <Pressable style={styles.signOutButton} onPress={onSignOut}>
-              <Ionicons name="log-out-outline" size={18} color="#ffffff" />
-            </Pressable>
-          </View>
-
-          <View style={styles.metricsRow}>
-            <View style={styles.metricCard}>
-              <Text style={styles.metricValue}>{isOnline ? 'Online' : 'Offline'}</Text>
-              <Text style={styles.metricLabel}>Current status</Text>
-            </View>
-            <View style={styles.metricCard}>
-              <Text style={styles.metricValue}>$0.00</Text>
-              <Text style={styles.metricLabel}>Today’s earnings</Text>
-            </View>
-            <View style={styles.metricCard}>
-              <Text style={styles.metricValue}>5.0</Text>
-              <Text style={styles.metricLabel}>Driver rating</Text>
-            </View>
-          </View>
-
-          <Pressable style={[styles.onlineButton, isOnline ? styles.onlineButtonLight : styles.onlineButtonGreen]} onPress={toggleAvailability}>
-            <Text style={[styles.onlineButtonText, isOnline ? styles.onlineButtonTextDark : styles.onlineButtonTextLight]}>
-              {isOnline ? 'Go offline' : 'Go online'}
-            </Text>
-          </Pressable>
-        </LinearGradient>
-
-        <View style={styles.requestCard}>
-          <View style={styles.requestHeader}>
-            <View>
-              <Text style={styles.requestTitle}>Dispatch preview</Text>
-              <Text style={styles.requestSubtitle}>Approved drivers will receive nearby towing jobs here</Text>
-            </View>
-            <View style={styles.priorityChip}>
-              <Ionicons name="flash-outline" size={14} color="#b45309" />
-              <Text style={styles.priorityChipText}>Priority</Text>
-            </View>
-          </View>
-
-          <View style={styles.routeRow}>
-            <View style={styles.routeIconColumn}>
-              <View style={[styles.routeDot, { backgroundColor: '#22c55e' }]} />
-              <View style={styles.routeDivider} />
-              <View style={[styles.routeDot, { backgroundColor: '#2563eb' }]} />
-            </View>
-
-            <View style={{ flex: 1 }}>
-              <View style={styles.routeBlock}>
-                <Text style={styles.routeLabel}>Pickup</Text>
-                <Text style={styles.routeValue}>Customer breakdown location appears here</Text>
-              </View>
-
-              <View style={styles.routeBlock}>
-                <Text style={styles.routeLabel}>Drop</Text>
-                <Text style={styles.routeValue}>Destination route appears after job acceptance</Text>
-              </View>
-            </View>
-          </View>
-        </View>
-
-        <View style={styles.sectionHeader}>
-          <View>
-            <Text style={styles.sectionTitle}>Supported tow classes</Text>
-            <Text style={styles.sectionSubtitle}>Loaded from the live Supabase backend</Text>
-          </View>
-
-          <View style={styles.connectedChip}>
-            <Ionicons name="checkmark-circle-outline" size={14} color="#166534" />
-            <Text style={styles.connectedChipText}>Approved</Text>
-          </View>
-        </View>
-
-        {loading ? (
-          <View style={styles.stateCard}>
-            <ActivityIndicator color="#16a34a" />
-            <Text style={styles.stateText}>Loading driver home...</Text>
-          </View>
-        ) : (
-          vehicleTypes.map((item) => (
-            <View key={item.id} style={styles.vehicleCard}>
-              <View style={styles.vehicleIconShell}>
-                <Ionicons name="car-sport-outline" size={20} color="#16a34a" />
-              </View>
-
-              <View style={{ flex: 1 }}>
-                <Text style={styles.vehicleTitle}>{item.name}</Text>
-                <Text style={styles.vehicleSubtitle}>
-                  Capacity range: {item.tonnage_min}t - {item.tonnage_max}t
-                </Text>
-              </View>
-
-              <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
-            </View>
-          ))
-        )}
-      </ScrollView>
-    </SafeAreaView>
-  );
-}
 
 const shadowCard = {
   shadowColor: '#020617',
@@ -208,248 +77,638 @@ const shadowCard = {
   elevation: 4,
 };
 
+function titleize(value?: string | null) {
+  if (!value) return 'Unknown';
+  return value.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function nextStatusAction(status?: string | null) {
+  switch (status) {
+    case 'driver_assigned':
+      return { label: 'Start route', next: 'driver_en_route' };
+    case 'driver_en_route':
+      return { label: 'Mark arrived', next: 'driver_arrived' };
+    case 'driver_arrived':
+      return { label: 'Start tow', next: 'in_service' };
+    case 'in_service':
+      return { label: 'Complete trip', next: 'completed' };
+    default:
+      return null;
+  }
+}
+
+function syncLabel(status: LocationSyncStatus) {
+  switch (status) {
+    case 'starting':
+      return 'Sync starting';
+    case 'active':
+      return 'Live sync active';
+    case 'denied':
+      return 'Location denied';
+    case 'error':
+      return 'Sync issue';
+    default:
+      return 'Sync idle';
+  }
+}
+
+function syncPillStyle(status: LocationSyncStatus) {
+  switch (status) {
+    case 'active':
+      return { backgroundColor: 'rgba(34,197,94,0.16)', borderColor: 'rgba(34,197,94,0.3)', color: '#dcfce7' };
+    case 'starting':
+      return { backgroundColor: 'rgba(59,130,246,0.16)', borderColor: 'rgba(59,130,246,0.3)', color: '#dbeafe' };
+    case 'denied':
+    case 'error':
+      return { backgroundColor: 'rgba(239,68,68,0.16)', borderColor: 'rgba(239,68,68,0.3)', color: '#fee2e2' };
+    default:
+      return { backgroundColor: 'rgba(148,163,184,0.16)', borderColor: 'rgba(148,163,184,0.3)', color: '#e2e8f0' };
+  }
+}
+
+export default function HomeScreen({ navigation }: Props) {
+  const [loading, setLoading] = useState(true);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [locationSyncStatus, setLocationSyncStatus] = useState<LocationSyncStatus>('idle');
+  const [state, setState] = useState<DispatchState>({
+    driver: null,
+    pending_offers: [],
+    active_booking: null,
+  });
+
+  const loadState = async () => {
+    const { data, error } = await supabase.rpc('get_driver_dispatch_state');
+
+    if (error) throw error;
+
+    const rawDriver = data?.driver && data.driver.profile_id ? (data.driver as DriverInfo) : null;
+    const rawPendingOffers = Array.isArray(data?.pending_offers)
+      ? (data.pending_offers as PendingOffer[])
+      : [];
+    const rawActiveBooking =
+      data?.active_booking && data.active_booking.booking_id
+        ? (data.active_booking as ActiveBooking)
+        : null;
+
+    setState({
+      driver: rawDriver,
+      pending_offers: rawPendingOffers,
+      active_booking: rawActiveBooking,
+    });
+  };
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      await loadState();
+    } catch (error) {
+      Alert.alert('Load failed', error instanceof Error ? error.message : 'Could not load driver state');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadState().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.log('[driver-home-poll]', message);
+      });
+    }, 8000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    let stopSync: (() => void) | null = null;
+    let active = true;
+
+    const canSync =
+      Boolean(state.driver?.profile_id) &&
+      state.driver?.verification_status === 'approved' &&
+      state.driver?.documents_status === 'approved' &&
+      Boolean(state.driver?.is_online);
+
+    if (!canSync) {
+      setLocationSyncStatus('idle');
+      return;
+    }
+
+    startDriverLocationSync({
+      bookingId: state.active_booking?.booking_id ?? null,
+      onStatusChange: (status) => {
+        if (active) setLocationSyncStatus(status);
+      },
+    })
+      .then((cleanup) => {
+        if (active) {
+          stopSync = cleanup;
+        } else {
+          cleanup();
+        }
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.log('[driver-location-sync-start]', message);
+        if (active) setLocationSyncStatus('error');
+      });
+
+    return () => {
+      active = false;
+      stopSync?.();
+    };
+  }, [
+    state.driver?.profile_id,
+    state.driver?.verification_status,
+    state.driver?.documents_status,
+    state.driver?.is_online,
+    state.active_booking?.booking_id,
+  ]);
+
+  const handleSignOut = async () => {
+    try {
+      if (Boolean(state.driver?.is_online)) {
+        await supabase.rpc('set_driver_online_status', { p_is_online: false });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log('[driver-signout-offline]', message);
+    }
+
+    const { error } = await supabase.auth.signOut();
+    if (error) {
+      Alert.alert('Sign out failed', error.message);
+    }
+  };
+
+  const toggleOnline = async () => {
+    if (!state.driver) return;
+
+    try {
+      setBusyKey('toggle-online');
+
+      const { data, error } = await supabase.rpc('set_driver_online_status', {
+        p_is_online: !Boolean(state.driver.is_online),
+      });
+
+      if (error) throw error;
+
+      if (!data?.success) {
+        Alert.alert('Cannot go online', data?.message || 'Driver is not eligible to go online yet.');
+      }
+
+      await loadState();
+    } catch (error) {
+      Alert.alert('Update failed', error instanceof Error ? error.message : 'Could not update online status');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const acceptOffer = async (offerId: string) => {
+    try {
+      setBusyKey(`accept-${offerId}`);
+      const { data, error } = await supabase.rpc('accept_driver_offer', {
+        p_offer_id: offerId,
+      });
+
+      if (error) throw error;
+
+      if (!data?.success) {
+        Alert.alert('Offer unavailable', data?.message || 'This booking was already claimed.');
+      }
+
+      await loadState();
+    } catch (error) {
+      Alert.alert('Accept failed', error instanceof Error ? error.message : 'Could not accept offer');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const rejectOffer = async (offerId: string) => {
+    try {
+      setBusyKey(`reject-${offerId}`);
+      const { error } = await supabase.rpc('reject_driver_offer', {
+        p_offer_id: offerId,
+      });
+
+      if (error) throw error;
+
+      await loadState();
+    } catch (error) {
+      Alert.alert('Reject failed', error instanceof Error ? error.message : 'Could not reject offer');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const updateBookingStatus = async (bookingId: string, nextStatus: string) => {
+    try {
+      setBusyKey(`status-${bookingId}-${nextStatus}`);
+      const { data, error } = await supabase.rpc('update_driver_booking_status', {
+        p_booking_id: bookingId,
+        p_status: nextStatus,
+      });
+
+      if (error) throw error;
+      if (!data?.success) {
+        Alert.alert('Status update failed', data?.message || 'Could not update booking status.');
+      }
+
+      await loadState();
+    } catch (error) {
+      Alert.alert('Status update failed', error instanceof Error ? error.message : 'Could not update booking status');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const activeAction = useMemo(
+    () => (state.active_booking ? nextStatusAction(state.active_booking.booking_status) : null),
+    [state.active_booking]
+  );
+
+  const syncColors = syncPillStyle(locationSyncStatus);
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.loadingWrap}>
+          <ActivityIndicator color="#ffffff" size="large" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const driver = state.driver;
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView
+        contentContainerStyle={styles.container}
+        showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={loading} onRefresh={refresh} tintColor="#ffffff" />}
+      >
+        <View style={styles.hero}>
+          <View style={styles.heroTop}>
+            <View>
+              <Text style={styles.heroEyebrow}>Tow operator</Text>
+              <Text style={styles.heroTitle}>Driver operations</Text>
+              <Text style={styles.heroSubtitle}>
+                Receive dispatch offers automatically and update job status from here.
+              </Text>
+            </View>
+
+            <Pressable style={styles.signOutButton} onPress={handleSignOut}>
+              <Ionicons name="log-out-outline" size={18} color="#ffffff" />
+            </Pressable>
+          </View>
+
+          <View style={styles.heroStatsRow}>
+            <View style={styles.heroStatPill}>
+              <Text style={styles.heroStatText}>
+                {driver?.full_name || driver?.email || 'Driver'}
+              </Text>
+            </View>
+
+            <View
+              style={[
+                styles.heroStatPill,
+                { backgroundColor: Boolean(driver?.is_online) ? 'rgba(34,197,94,0.16)' : 'rgba(148,163,184,0.16)' },
+              ]}
+            >
+              <Text style={styles.heroStatText}>
+                {Boolean(driver?.is_online) ? 'Online' : 'Offline'}
+              </Text>
+            </View>
+
+            <View
+              style={[
+                styles.heroStatPill,
+                {
+                  backgroundColor: syncColors.backgroundColor,
+                  borderColor: syncColors.borderColor,
+                },
+              ]}
+            >
+              <Text style={[styles.heroStatText, { color: syncColors.color }]}>
+                {syncLabel(locationSyncStatus)}
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {!driver ? (
+          <View style={styles.stateCard}>
+            <Text style={styles.stateText}>No driver profile was found for this account.</Text>
+          </View>
+        ) : driver.verification_status !== 'approved' || driver.documents_status !== 'approved' ? (
+          <View style={styles.pendingCard}>
+            <Text style={styles.pendingTitle}>Approval still pending</Text>
+            <Text style={styles.pendingText}>
+              Account status: {titleize(driver.verification_status)}{'\n'}
+              Document status: {titleize(driver.documents_status)}{'\n\n'}
+              Both must be approved before this driver can go online and receive customer jobs.
+            </Text>
+
+            <Pressable style={styles.documentsButton} onPress={() => navigation.navigate('Documents')}>
+              <Text style={styles.documentsButtonText}>
+                {(driver.documents_status ?? 'not_submitted') === 'not_submitted' ? 'Submit documents' : 'View documents'}
+              </Text>
+            </Pressable>
+          </View>
+        ) : (
+          <>
+            <View style={styles.controlsRow}>
+              <Pressable
+                style={[styles.toggleButton, Boolean(driver.is_online) ? styles.toggleButtonOnline : styles.toggleButtonOffline]}
+                onPress={toggleOnline}
+                disabled={busyKey === 'toggle-online'}
+              >
+                <Text style={styles.toggleButtonText}>
+                  {busyKey === 'toggle-online'
+                    ? 'Updating...'
+                    : Boolean(driver.is_online)
+                    ? 'Go offline'
+                    : 'Go online'}
+                </Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.quickLinksRow}>
+              <Pressable style={styles.quickLinkCard} onPress={() => navigation.navigate('Documents')}>
+                <Ionicons name="document-text-outline" size={18} color="#1d4ed8" />
+                <Text style={styles.quickLinkText}>Documents</Text>
+              </Pressable>
+
+              <Pressable
+                style={styles.quickLinkCard}
+                onPress={() => navigation.navigate('TripMap')}
+              >
+                <Ionicons
+                  name="map-outline"
+                  size={18}
+                  color={state.active_booking ? '#1d4ed8' : '#0f766e'}
+                />
+                <Text style={[styles.quickLinkText, { color: state.active_booking ? '#1d4ed8' : '#0f766e' }]}>
+                  {state.active_booking ? 'Trip map' : 'Standby map'}
+                </Text>
+              </Pressable>
+
+              <View style={styles.quickLinkCardMuted}>
+                <Ionicons name="wallet-outline" size={18} color="#64748b" />
+                <Text style={styles.quickLinkTextMuted}>Earnings next</Text>
+              </View>
+            </View>
+
+            {state.active_booking ? (
+              <View style={styles.activeCard}>
+                <Text style={styles.cardEyebrow}>Active booking</Text>
+                <Text style={styles.activeTitle}>{state.active_booking.vehicle_type_name || 'Tow job'}</Text>
+                <Text style={styles.activeSubtitle}>
+                  {titleize(state.active_booking.booking_status)}
+                </Text>
+
+                <View style={styles.routeBlock}>
+                  <Text style={styles.routeLabel}>Pickup</Text>
+                  <Text style={styles.routeValue}>{state.active_booking.pickup_address || 'Pickup not available'}</Text>
+                </View>
+
+                <View style={styles.routeBlock}>
+                  <Text style={styles.routeLabel}>Dropoff</Text>
+                  <Text style={styles.routeValue}>{state.active_booking.drop_address || 'Dropoff not available'}</Text>
+                </View>
+
+                <View style={styles.metaRow}>
+                  <View style={styles.metaPill}>
+                    <Text style={styles.metaPillText}>Customer: {state.active_booking.customer_name || 'Customer'}</Text>
+                  </View>
+                  <View style={styles.metaPill}>
+                    <Text style={styles.metaPillText}>${Number(state.active_booking.quoted_amount || 0).toFixed(2)}</Text>
+                  </View>
+                </View>
+
+                <Pressable style={styles.secondaryTripButton} onPress={() => navigation.navigate('TripMap')}>
+                  <Ionicons name="map-outline" size={16} color="#1d4ed8" />
+                  <Text style={styles.secondaryTripButtonText}>Open trip map</Text>
+                </Pressable>
+
+                {activeAction ? (
+                  <Pressable
+                    style={styles.primaryButton}
+                    disabled={busyKey === `status-${state.active_booking.booking_id}-${activeAction.next}`}
+                    onPress={() => updateBookingStatus(state.active_booking!.booking_id, activeAction.next)}
+                  >
+                    <Text style={styles.primaryButtonText}>
+                      {busyKey === `status-${state.active_booking.booking_id}-${activeAction.next}`
+                        ? 'Updating...'
+                        : activeAction.label}
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : (
+              <View style={styles.standbyCard}>
+                <Text style={styles.standbyTitle}>Standby mode</Text>
+                <Text style={styles.standbyText}>
+                  You have no active towing job right now. Open the standby map to see your live position and stay ready for the next dispatch.
+                </Text>
+
+                <View style={styles.metaRow}>
+                  <View style={styles.metaPill}>
+                    <Text style={styles.metaPillText}>{syncLabel(locationSyncStatus)}</Text>
+                  </View>
+                  <View style={styles.metaPill}>
+                    <Text style={styles.metaPillText}>Mode: Standby</Text>
+                  </View>
+                </View>
+
+                <Pressable style={styles.secondaryTripButton} onPress={() => navigation.navigate('TripMap')}>
+                  <Ionicons name="map-outline" size={16} color="#1d4ed8" />
+                  <Text style={styles.secondaryTripButtonText}>Open standby map</Text>
+                </Pressable>
+              </View>
+            )}
+
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Incoming offers</Text>
+              <Text style={styles.sectionSubtitle}>
+                Automatic dispatch offers arrive here while you are online.
+              </Text>
+            </View>
+
+            {state.pending_offers.length === 0 ? (
+              <View style={styles.stateCard}>
+                <Text style={styles.stateText}>
+                  {Boolean(driver.is_online)
+                    ? 'No incoming offers yet.'
+                    : 'Go online to start receiving dispatch requests.'}
+                </Text>
+              </View>
+            ) : (
+              state.pending_offers.map((offer) => (
+                <View key={offer.offer_id} style={styles.offerCard}>
+                  <View style={styles.offerTopRow}>
+                    <View>
+                      <Text style={styles.offerTitle}>{offer.vehicle_type_name || 'Tow offer'}</Text>
+                      <Text style={styles.offerSubtitle}>
+                        {(offer.customer_name || 'Customer')} • {offer.created_at ? new Date(offer.created_at).toLocaleString() : 'Now'}
+                      </Text>
+                    </View>
+
+                    <View style={styles.priceChip}>
+                      <Text style={styles.priceChipText}>${Number(offer.quoted_amount || 0).toFixed(2)}</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.routeBlock}>
+                    <Text style={styles.routeLabel}>Pickup</Text>
+                    <Text style={styles.routeValue}>{offer.pickup_address || 'Pickup not available'}</Text>
+                  </View>
+
+                  <View style={styles.routeBlock}>
+                    <Text style={styles.routeLabel}>Dropoff</Text>
+                    <Text style={styles.routeValue}>{offer.drop_address || 'Dropoff not available'}</Text>
+                  </View>
+
+                  <View style={styles.offerFooter}>
+                    <Text style={styles.expiryText}>
+                      Expires: {offer.expires_at ? new Date(offer.expires_at).toLocaleTimeString() : 'Soon'}
+                    </Text>
+                  </View>
+
+                  <View style={styles.offerActions}>
+                    <Pressable
+                      style={styles.acceptButton}
+                      disabled={busyKey === `accept-${offer.offer_id}`}
+                      onPress={() => acceptOffer(offer.offer_id)}
+                    >
+                      <Text style={styles.acceptButtonText}>
+                        {busyKey === `accept-${offer.offer_id}` ? 'Accepting...' : 'Accept'}
+                      </Text>
+                    </Pressable>
+
+                    <Pressable
+                      style={styles.rejectButton}
+                      disabled={busyKey === `reject-${offer.offer_id}`}
+                      onPress={() => rejectOffer(offer.offer_id)}
+                    >
+                      <Text style={styles.rejectButtonText}>
+                        {busyKey === `reject-${offer.offer_id}` ? 'Rejecting...' : 'Reject'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ))
+            )}
+          </>
+        )}
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
 const styles = StyleSheet.create({
-  safeArea: {
+  safeArea: { flex: 1, backgroundColor: '#06111F' },
+  container: { padding: 18, paddingBottom: 30 },
+  loadingWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  hero: { backgroundColor: '#0B1220', borderRadius: 28, padding: 22, marginBottom: 18, ...shadowCard },
+  heroTop: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, marginBottom: 18 },
+  heroEyebrow: { color: '#7dd3fc', fontSize: 12, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 },
+  heroTitle: { color: '#ffffff', fontSize: 30, fontWeight: '800', marginBottom: 8 },
+  heroSubtitle: { color: '#cbd5e1', fontSize: 14, lineHeight: 21, maxWidth: 270 },
+  signOutButton: { width: 42, height: 42, borderRadius: 15, backgroundColor: 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center' },
+  heroStatsRow: { flexDirection: 'row', flexWrap: 'wrap' },
+  heroStatPill: { backgroundColor: 'rgba(125,211,252,0.12)', borderWidth: 1, borderColor: 'rgba(125,211,252,0.2)', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8, marginRight: 10, marginBottom: 10 },
+  heroStatText: { color: '#dbeafe', fontSize: 12, fontWeight: '800' },
+  controlsRow: { marginBottom: 14 },
+  toggleButton: { borderRadius: 18, paddingVertical: 16, alignItems: 'center', ...shadowCard },
+  toggleButtonOnline: { backgroundColor: '#ef4444' },
+  toggleButtonOffline: { backgroundColor: '#16a34a' },
+  toggleButtonText: { color: '#ffffff', fontSize: 15, fontWeight: '800' },
+  quickLinksRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 10, marginBottom: 16 },
+  quickLinkCard: {
     flex: 1,
-    backgroundColor: '#07111F',
-  },
-  container: {
-    padding: 18,
-    paddingBottom: 30,
-  },
-  hero: {
-    borderRadius: 28,
-    padding: 22,
-    marginBottom: 18,
-    ...shadowCard,
-  },
-  heroTopRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 12,
-    marginBottom: 18,
-  },
-  heroEyebrow: {
-    color: '#86efac',
-    fontSize: 12,
-    fontWeight: '800',
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginBottom: 10,
-  },
-  heroTitle: {
-    color: '#ffffff',
-    fontSize: 30,
-    fontWeight: '800',
-    marginBottom: 8,
-  },
-  heroSubtitle: {
-    color: '#d1d5db',
-    fontSize: 14,
-    lineHeight: 21,
-    maxWidth: 280,
-  },
-  signOutButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 15,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: '#ffffff',
+    borderRadius: 18,
+    paddingVertical: 14,
     alignItems: 'center',
     justifyContent: 'center',
+    ...shadowCard,
   },
-  metricsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 18,
+  quickLinkCardMuted: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+    borderRadius: 18,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    opacity: 0.82,
+    ...shadowCard,
   },
-  metricCard: {
-    width: '31%',
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderRadius: 20,
-    paddingVertical: 16,
-    paddingHorizontal: 10,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
-  },
-  metricValue: {
-    color: '#ffffff',
-    fontSize: 18,
-    fontWeight: '800',
-    marginBottom: 6,
-  },
-  metricLabel: {
-    color: '#d1d5db',
-    fontSize: 12,
-    lineHeight: 17,
-    fontWeight: '700',
-  },
-  onlineButton: {
+  quickLinkText: { color: '#1d4ed8', fontSize: 12, fontWeight: '800', marginTop: 8 },
+  quickLinkTextMuted: { color: '#64748b', fontSize: 12, fontWeight: '800', marginTop: 8 },
+  pendingCard: { backgroundColor: '#ffffff', borderRadius: 24, padding: 20, marginBottom: 16, ...shadowCard },
+  pendingTitle: { color: '#0f172a', fontSize: 22, fontWeight: '800', marginBottom: 8 },
+  pendingText: { color: '#475569', fontSize: 14, lineHeight: 22, marginBottom: 16 },
+  documentsButton: {
+    backgroundColor: '#2563eb',
     borderRadius: 18,
     paddingVertical: 15,
     alignItems: 'center',
   },
-  onlineButtonGreen: {
-    backgroundColor: '#16a34a',
-  },
-  onlineButtonLight: {
-    backgroundColor: '#ffffff',
-  },
-  onlineButtonText: {
-    fontSize: 15,
-    fontWeight: '800',
-  },
-  onlineButtonTextLight: {
-    color: '#ffffff',
-  },
-  onlineButtonTextDark: {
-    color: '#0f172a',
-  },
-  requestCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 26,
-    padding: 18,
-    marginBottom: 18,
-    ...shadowCard,
-  },
-  requestHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 16,
-  },
-  requestTitle: {
-    color: '#0f172a',
-    fontSize: 18,
-    fontWeight: '800',
-    marginBottom: 4,
-  },
-  requestSubtitle: {
-    color: '#64748b',
-    fontSize: 13,
-    fontWeight: '600',
-    maxWidth: 220,
-  },
-  priorityChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fef3c7',
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-  },
-  priorityChipText: {
-    color: '#b45309',
-    fontSize: 12,
-    fontWeight: '800',
-    marginLeft: 6,
-  },
-  routeRow: {
-    flexDirection: 'row',
-  },
-  routeIconColumn: {
-    width: 24,
-    alignItems: 'center',
-    marginRight: 12,
-    paddingTop: 4,
-  },
-  routeDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-  },
-  routeDivider: {
-    width: 2,
-    flex: 1,
-    backgroundColor: '#cbd5e1',
-    marginVertical: 6,
-  },
-  routeBlock: {
-    marginBottom: 14,
-  },
-  routeLabel: {
-    color: '#64748b',
-    fontSize: 12,
-    fontWeight: '700',
-    marginBottom: 4,
-    textTransform: 'uppercase',
-  },
-  routeValue: {
-    color: '#0f172a',
-    fontSize: 15,
-    fontWeight: '800',
-    lineHeight: 21,
-  },
-  sectionHeader: {
-    marginBottom: 12,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-end',
-    gap: 12,
-  },
-  sectionTitle: {
-    color: '#ffffff',
-    fontSize: 22,
-    fontWeight: '800',
-    marginBottom: 4,
-  },
-  sectionSubtitle: {
-    color: '#94a3b8',
-    fontSize: 13,
-  },
-  connectedChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#dcfce7',
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderRadius: 999,
-  },
-  connectedChipText: {
-    color: '#166534',
-    fontSize: 12,
-    fontWeight: '800',
-    marginLeft: 6,
-  },
-  stateCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 22,
-    padding: 20,
-    alignItems: 'center',
-    ...shadowCard,
-  },
-  stateText: {
-    color: '#334155',
-    fontSize: 14,
-    fontWeight: '700',
-    marginTop: 10,
-  },
-  vehicleCard: {
-    backgroundColor: '#ffffff',
-    borderRadius: 22,
-    padding: 16,
-    marginBottom: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    ...shadowCard,
-  },
-  vehicleIconShell: {
-    width: 44,
-    height: 44,
+  documentsButtonText: { color: '#ffffff', fontSize: 15, fontWeight: '800' },
+  activeCard: { backgroundColor: '#ffffff', borderRadius: 24, padding: 18, marginBottom: 18, ...shadowCard },
+  standbyCard: { backgroundColor: '#ffffff', borderRadius: 24, padding: 18, marginBottom: 18, ...shadowCard },
+  standbyTitle: { color: '#0f172a', fontSize: 22, fontWeight: '800', marginBottom: 8 },
+  standbyText: { color: '#475569', fontSize: 14, lineHeight: 22, marginBottom: 14 },
+  cardEyebrow: { color: '#16a34a', fontSize: 12, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 },
+  activeTitle: { color: '#0f172a', fontSize: 22, fontWeight: '800', marginBottom: 4 },
+  activeSubtitle: { color: '#1d4ed8', fontSize: 14, fontWeight: '800', marginBottom: 14 },
+  routeBlock: { marginBottom: 12 },
+  routeLabel: { color: '#64748b', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', marginBottom: 4 },
+  routeValue: { color: '#0f172a', fontSize: 15, fontWeight: '700', lineHeight: 21 },
+  metaRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 14 },
+  metaPill: { backgroundColor: '#f8fafc', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 10, marginRight: 10, marginBottom: 10 },
+  metaPillText: { color: '#334155', fontSize: 12, fontWeight: '800' },
+  secondaryTripButton: {
+    backgroundColor: '#eff6ff',
     borderRadius: 16,
-    backgroundColor: '#dcfce7',
-    justifyContent: 'center',
+    paddingVertical: 14,
     alignItems: 'center',
-    marginRight: 14,
+    justifyContent: 'center',
+    flexDirection: 'row',
+    marginBottom: 12,
   },
-  vehicleTitle: {
-    color: '#0f172a',
-    fontSize: 16,
+  secondaryTripButtonText: {
+    color: '#1d4ed8',
+    fontSize: 14,
     fontWeight: '800',
-    marginBottom: 4,
+    marginLeft: 8,
   },
-  vehicleSubtitle: {
-    color: '#64748b',
-    fontSize: 13,
-    fontWeight: '600',
-  },
+  primaryButton: { backgroundColor: '#16a34a', borderRadius: 18, paddingVertical: 16, alignItems: 'center' },
+  primaryButtonText: { color: '#ffffff', fontSize: 15, fontWeight: '800' },
+  sectionHeader: { marginBottom: 12 },
+  sectionTitle: { color: '#ffffff', fontSize: 22, fontWeight: '800', marginBottom: 4 },
+  sectionSubtitle: { color: '#94a3b8', fontSize: 13 },
+  stateCard: { backgroundColor: '#ffffff', borderRadius: 22, padding: 20, alignItems: 'center', marginBottom: 16, ...shadowCard },
+  stateText: { color: '#334155', fontSize: 14, fontWeight: '700', textAlign: 'center' },
+  offerCard: { backgroundColor: '#ffffff', borderRadius: 24, padding: 18, marginBottom: 14, ...shadowCard },
+  offerTopRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, marginBottom: 14, alignItems: 'flex-start' },
+  offerTitle: { color: '#0f172a', fontSize: 18, fontWeight: '800', marginBottom: 4 },
+  offerSubtitle: { color: '#64748b', fontSize: 13, fontWeight: '600' },
+  priceChip: { backgroundColor: '#eff6ff', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
+  priceChipText: { color: '#1d4ed8', fontSize: 13, fontWeight: '800' },
+  offerFooter: { marginBottom: 12 },
+  expiryText: { color: '#b45309', fontSize: 12, fontWeight: '800' },
+  offerActions: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
+  acceptButton: { flex: 1, backgroundColor: '#16a34a', borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
+  acceptButtonText: { color: '#ffffff', fontSize: 14, fontWeight: '800' },
+  rejectButton: { flex: 1, backgroundColor: '#fee2e2', borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
+  rejectButtonText: { color: '#b91c1c', fontSize: 14, fontWeight: '800' },
 });
