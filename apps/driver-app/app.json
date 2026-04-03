@@ -1,30 +1,47 @@
 {
   "expo": {
-    "name": "driver-app",
+    "name": "TowSwift Driver",
     "slug": "driver-app",
     "version": "1.0.0",
+    "scheme": "towswift-driver",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.martinsolaiya.towswiftdriver"
     },
     "android": {
+      "package": "com.martinsolaiya.towswiftdriver",
+      "permissions": [
+        "POST_NOTIFICATIONS"
+      ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "edgeToEdgeEnabled": true
     },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "defaultChannel": "default"
+        }
+      ]
+    ],
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "7dbb4325-d0a0-40b5-b99e-f4dcad32abf8"
+      }
     }
   }
 }
