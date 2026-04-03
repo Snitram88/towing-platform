@@ -11,3 +11,4 @@ supabase/.branches
 supabase/.temp
 
 .env.functions
+apps/driver-app/google-services.json
