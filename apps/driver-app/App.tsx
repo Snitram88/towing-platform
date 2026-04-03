@@ -11,6 +11,10 @@ import SignUpScreen from './src/screens/SignUpScreen';
 import HomeScreen from './src/screens/HomeScreen';
 import DocumentsScreen from './src/screens/DocumentsScreen';
 import TripMapScreen from './src/screens/TripMapScreen';
+import HistoryScreen from './src/screens/HistoryScreen';
+import EarningsScreen from './src/screens/EarningsScreen';
+import ProfileScreen from './src/screens/ProfileScreen';
+import SupportScreen from './src/screens/SupportScreen';
 
 const Stack = createNativeStackNavigator<any>();
 
@@ -82,6 +86,10 @@ export default function App() {
             <Stack.Screen name="Home" component={HomeScreen} />
             <Stack.Screen name="Documents" component={DocumentsScreen} />
             <Stack.Screen name="TripMap" component={TripMapScreen} />
+            <Stack.Screen name="History" component={HistoryScreen} />
+            <Stack.Screen name="Earnings" component={EarningsScreen} />
+            <Stack.Screen name="Profile" component={ProfileScreen} />
+            <Stack.Screen name="Support" component={SupportScreen} />
           </Stack.Navigator>
         ) : (
           <Stack.Navigator initialRouteName="Welcome" screenOptions={screenOptions}>
