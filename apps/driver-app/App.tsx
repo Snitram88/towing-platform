@@ -1,9 +1,14 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, StatusBar, StyleSheet, View } from 'react-native';
-import { NavigationContainer, DarkTheme } from '@react-navigation/native';
+import {
+  NavigationContainer,
+  DarkTheme,
+  createNavigationContainerRef,
+} from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import type { Session } from '@supabase/supabase-js';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import * as Notifications from 'expo-notifications';
 import { supabase } from './src/lib/supabase';
 import WelcomeScreen from './src/screens/WelcomeScreen';
 import SignInScreen from './src/screens/SignInScreen';
@@ -15,8 +20,23 @@ import HistoryScreen from './src/screens/HistoryScreen';
 import EarningsScreen from './src/screens/EarningsScreen';
 import ProfileScreen from './src/screens/ProfileScreen';
 import SupportScreen from './src/screens/SupportScreen';
+import {
+  deactivatePushToken,
+  registerForPushNotificationsAsync,
+  resolveNotificationTarget,
+} from './src/lib/pushNotifications';
 
 const Stack = createNativeStackNavigator<any>();
+const navigationRef = createNavigationContainerRef<any>();
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 const navTheme = {
   ...DarkTheme,
@@ -30,9 +50,27 @@ const navTheme = {
   },
 };
 
+function handleNotificationNavigation(data: unknown) {
+  if (!navigationRef.isReady()) return;
+
+  const target = resolveNotificationTarget(data);
+
+  try {
+    navigationRef.navigate(target.screen as never, (target.params ?? {}) as never);
+  } catch (error) {
+    console.log(
+      '[notification-navigation]',
+      error instanceof Error ? error.message : String(error)
+    );
+    navigationRef.navigate('Home' as never);
+  }
+}
+
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [booting, setBooting] = useState(true);
+  const currentPushTokenRef = useRef<string | null>(null);
+  const handledNotificationIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let active = true;
@@ -46,7 +84,12 @@ export default function App() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
+      if (!nextSession && currentPushTokenRef.current) {
+        await deactivatePushToken(currentPushTokenRef.current);
+        currentPushTokenRef.current = null;
+      }
+
       setSession(nextSession ?? null);
       setBooting(false);
     });
@@ -56,6 +99,57 @@ export default function App() {
       subscription.unsubscribe();
     };
   }, []);
+
+  useEffect(() => {
+    const receivedSubscription =
+      Notifications.addNotificationReceivedListener((notification) => {
+        console.log(
+          '[notification-received]',
+          notification.request.identifier,
+          notification.request.content.title
+        );
+      });
+
+    const responseSubscription =
+      Notifications.addNotificationResponseReceivedListener((response) => {
+        const id = response.notification.request.identifier;
+
+        if (handledNotificationIdsRef.current.has(id)) return;
+        handledNotificationIdsRef.current.add(id);
+
+        handleNotificationNavigation(response.notification.request.content.data);
+      });
+
+    return () => {
+      receivedSubscription.remove();
+      responseSubscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    async function register() {
+      if (!session?.user?.id) return;
+
+      const result = await registerForPushNotificationsAsync(session.user.id, 'driver');
+
+      if (!active) return;
+
+      if (result.status === 'ok') {
+        currentPushTokenRef.current = result.token;
+        console.log('[push-registered]', result.token);
+      } else {
+        console.log('[push-registration]', result.status, result.message);
+      }
+    }
+
+    void register();
+
+    return () => {
+      active = false;
+    };
+  }, [session?.user?.id]);
 
   const screenOptions = useMemo(
     () => ({
@@ -80,7 +174,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <StatusBar barStyle="light-content" backgroundColor="#06111F" />
-      <NavigationContainer theme={navTheme}>
+      <NavigationContainer ref={navigationRef} theme={navTheme}>
         {session ? (
           <Stack.Navigator screenOptions={screenOptions}>
             <Stack.Screen name="Home" component={HomeScreen} />
