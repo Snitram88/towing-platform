@@ -19,6 +19,7 @@ type Props = {
 
 type DriverRow = {
   documents_status: string;
+  documents_rejection_note: string | null;
   government_id_url: string | null;
   drivers_license_url: string | null;
   vehicle_license_url: string | null;
@@ -81,6 +82,39 @@ async function uploadPickedFile(
   return path;
 }
 
+function statusAppearance(status: string) {
+  switch (status) {
+    case 'approved':
+      return {
+        bg: '#dcfce7',
+        color: '#166534',
+        title: 'Documents approved',
+        body: 'Your compliance documents have been approved. You can keep them updated here anytime.',
+      };
+    case 'pending':
+      return {
+        bg: '#fef3c7',
+        color: '#b45309',
+        title: 'Documents under review',
+        body: 'Admin is reviewing your submitted documents. You can still open and review what you uploaded.',
+      };
+    case 'rejected':
+      return {
+        bg: '#fee2e2',
+        color: '#b91c1c',
+        title: 'Documents need attention',
+        body: 'One or more documents were rejected. Please review the note below and resubmit corrected files.',
+      };
+    default:
+      return {
+        bg: '#e2e8f0',
+        color: '#334155',
+        title: 'Documents not submitted',
+        body: 'Upload all required files so admin can review and approve your driver account.',
+      };
+  }
+}
+
 export default function DocumentsScreen({ navigation }: Props) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -102,7 +136,7 @@ export default function DocumentsScreen({ navigation }: Props) {
     const { data, error } = await supabase
       .from('drivers')
       .select(
-        'documents_status, government_id_url, drivers_license_url, vehicle_license_url, vehicle_photo_url'
+        'documents_status, documents_rejection_note, government_id_url, drivers_license_url, vehicle_license_url, vehicle_photo_url'
       )
       .eq('profile_id', user.id)
       .single();
@@ -134,19 +168,6 @@ export default function DocumentsScreen({ navigation }: Props) {
 
     setter(result.assets[0]);
   };
-
-  const canSubmit = useMemo(() => {
-    return (
-      governmentId !== null ||
-      driversLicense !== null ||
-      vehicleLicense !== null ||
-      vehiclePhoto !== null ||
-      !!driverRow?.government_id_url ||
-      !!driverRow?.drivers_license_url ||
-      !!driverRow?.vehicle_license_url ||
-      !!driverRow?.vehicle_photo_url
-    );
-  }, [governmentId, driversLicense, vehicleLicense, vehiclePhoto, driverRow]);
 
   const allRequiredPresent = useMemo(() => {
     return Boolean(
@@ -205,12 +226,15 @@ export default function DocumentsScreen({ navigation }: Props) {
           vehicle_license_url: vehicleLicensePath,
           vehicle_photo_url: vehiclePhotoPath,
           documents_status: 'pending',
+          documents_rejection_note: null,
           is_online: false,
           is_available: false,
         })
         .eq('profile_id', user.id);
 
       if (error) throw error;
+
+      await loadDriverDocs();
 
       Alert.alert(
         'Documents submitted',
@@ -236,7 +260,7 @@ export default function DocumentsScreen({ navigation }: Props) {
   ) => (
     <View style={styles.docCard}>
       <View style={styles.docHeader}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.docTitle}>{title}</Text>
           <Text style={styles.docSubtitle}>{subtitle}</Text>
         </View>
@@ -265,6 +289,9 @@ export default function DocumentsScreen({ navigation }: Props) {
     );
   }
 
+  const currentStatus = driverRow?.documents_status || 'not_submitted';
+  const appearance = statusAppearance(currentStatus);
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
@@ -278,17 +305,29 @@ export default function DocumentsScreen({ navigation }: Props) {
 
         <View style={styles.heroCard}>
           <Text style={styles.heroEyebrow}>Compliance</Text>
-          <Text style={styles.heroTitle}>Submit your required documents</Text>
+          <Text style={styles.heroTitle}>Submit and manage documents</Text>
           <Text style={styles.heroSubtitle}>
-            Once submitted, admin reviews them before you can go online and receive jobs.
+            Keep your documents ready for review, approval, and resubmission when necessary.
           </Text>
 
-          <View style={styles.statusPill}>
-            <Text style={styles.statusPillText}>
-              Current status: {titleize(driverRow?.documents_status || 'not_submitted')}
+          <View style={[styles.statusPill, { backgroundColor: appearance.bg }]}>
+            <Text style={[styles.statusPillText, { color: appearance.color }]}>
+              Current status: {titleize(currentStatus)}
             </Text>
           </View>
         </View>
+
+        <View style={styles.statusCard}>
+          <Text style={styles.statusTitle}>{appearance.title}</Text>
+          <Text style={styles.statusBody}>{appearance.body}</Text>
+        </View>
+
+        {currentStatus === 'rejected' && driverRow?.documents_rejection_note ? (
+          <View style={styles.rejectionCard}>
+            <Text style={styles.rejectionTitle}>Admin note</Text>
+            <Text style={styles.rejectionText}>{driverRow.documents_rejection_note}</Text>
+          </View>
+        ) : null}
 
         {renderDocCard(
           'Government ID',
@@ -325,16 +364,22 @@ export default function DocumentsScreen({ navigation }: Props) {
         <View style={styles.noteCard}>
           <Text style={styles.noteTitle}>What happens next</Text>
           <Text style={styles.noteText}>
-            After submission, your document status becomes pending. Admin will review and approve or reject the submission.
+            When you submit or resubmit, your document status returns to pending and admin reviews the new files again.
           </Text>
         </View>
 
         <Pressable
-          style={[styles.primaryButton, (!canSubmit || saving) && styles.primaryButtonDisabled]}
-          disabled={!canSubmit || saving}
+          style={[styles.primaryButton, saving && styles.primaryButtonDisabled]}
+          disabled={saving}
           onPress={submitDocuments}
         >
-          {saving ? <ActivityIndicator color="#ffffff" /> : <Text style={styles.primaryButtonText}>Submit documents</Text>}
+          {saving ? (
+            <ActivityIndicator color="#ffffff" />
+          ) : (
+            <Text style={styles.primaryButtonText}>
+              {currentStatus === 'rejected' ? 'Resubmit documents' : 'Submit documents'}
+            </Text>
+          )}
         </Pressable>
       </ScrollView>
     </SafeAreaView>
@@ -390,15 +435,49 @@ const styles = StyleSheet.create({
   },
   statusPill: {
     alignSelf: 'flex-start',
-    backgroundColor: 'rgba(255,255,255,0.12)',
     borderRadius: 999,
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
   statusPillText: {
-    color: '#dbeafe',
     fontSize: 12,
     fontWeight: '800',
+  },
+  statusCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 22,
+    padding: 18,
+    marginBottom: 14,
+    ...shadowCard,
+  },
+  statusTitle: {
+    color: '#0f172a',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  statusBody: {
+    color: '#475569',
+    fontSize: 14,
+    lineHeight: 22,
+  },
+  rejectionCard: {
+    backgroundColor: '#fff1f2',
+    borderRadius: 22,
+    padding: 18,
+    marginBottom: 14,
+    ...shadowCard,
+  },
+  rejectionTitle: {
+    color: '#b91c1c',
+    fontSize: 17,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  rejectionText: {
+    color: '#7f1d1d',
+    fontSize: 14,
+    lineHeight: 22,
   },
   docCard: {
     backgroundColor: '#ffffff',
@@ -423,7 +502,6 @@ const styles = StyleSheet.create({
     color: '#64748b',
     fontSize: 13,
     lineHeight: 18,
-    maxWidth: 230,
   },
   pickButton: {
     backgroundColor: '#eff6ff',

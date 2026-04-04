@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -11,6 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import * as Haptics from 'expo-haptics';
 import { supabase } from '../lib/supabase';
 import { LocationSyncStatus, startDriverLocationSync } from '../lib/locationSync';
 
@@ -69,6 +71,13 @@ type Props = {
   navigation: any;
 };
 
+type BannerTone = 'info' | 'success' | 'warning';
+
+type BannerState = {
+  tone: BannerTone;
+  message: string;
+} | null;
+
 const shadowCard = {
   shadowColor: '#020617',
   shadowOpacity: 0.14,
@@ -77,9 +86,21 @@ const shadowCard = {
   elevation: 4,
 };
 
+const TRIP_STAGES = [
+  { key: 'driver_assigned', label: 'Assigned' },
+  { key: 'driver_en_route', label: 'En route' },
+  { key: 'driver_arrived', label: 'Arrived' },
+  { key: 'in_service', label: 'Towing' },
+  { key: 'completed', label: 'Completed' },
+];
+
 function titleize(value?: string | null) {
   if (!value) return 'Unknown';
   return value.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function money(value?: number | null) {
+  return `$${Number(value || 0).toFixed(2)}`;
 }
 
 function nextStatusAction(status?: string | null) {
@@ -126,6 +147,66 @@ function syncPillStyle(status: LocationSyncStatus) {
   }
 }
 
+function bannerColors(tone: BannerTone) {
+  switch (tone) {
+    case 'success':
+      return { backgroundColor: '#dcfce7', color: '#166534', icon: 'checkmark-circle' as const };
+    case 'warning':
+      return { backgroundColor: '#fef3c7', color: '#b45309', icon: 'alert-circle' as const };
+    default:
+      return { backgroundColor: '#dbeafe', color: '#1d4ed8', icon: 'information-circle' as const };
+  }
+}
+
+function formatRelativeTime(date: Date | null) {
+  if (!date) return 'Never';
+  const diffSeconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+
+  if (diffSeconds < 5) return 'Just now';
+  if (diffSeconds < 60) return `${diffSeconds}s ago`;
+
+  const minutes = Math.floor(diffSeconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
+}
+
+function formatCountdown(expiresAt?: string | null, nowMs: number = Date.now()) {
+  if (!expiresAt) return 'Unknown';
+
+  const diff = new Date(expiresAt).getTime() - nowMs;
+  if (diff <= 0) return 'Expired';
+
+  const totalSeconds = Math.floor(diff / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function currentTripStageIndex(status?: string | null) {
+  const idx = TRIP_STAGES.findIndex((stage) => stage.key === status);
+  return idx === -1 ? -1 : idx;
+}
+
+function statusHelperText(status?: string | null) {
+  switch (status) {
+    case 'driver_assigned':
+      return 'Proceed to the pickup point and begin navigation.';
+    case 'driver_en_route':
+      return 'You are on your way to the customer pickup location.';
+    case 'driver_arrived':
+      return 'Confirm arrival, secure the vehicle, and start the tow.';
+    case 'in_service':
+      return 'Vehicle is in service. Continue to the dropoff destination.';
+    case 'completed':
+      return 'Trip completed successfully.';
+    default:
+      return 'Awaiting trip activity.';
+  }
+}
+
 export default function HomeScreen({ navigation }: Props) {
   const [loading, setLoading] = useState(true);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -135,6 +216,13 @@ export default function HomeScreen({ navigation }: Props) {
     pending_offers: [],
     active_booking: null,
   });
+  const [banner, setBanner] = useState<BannerState>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+  const [clockNow, setClockNow] = useState(Date.now());
+
+  const initializedRef = useRef(false);
+  const previousOfferIdsRef = useRef<string[]>([]);
+  const previousBookingStatusRef = useRef<string | null>(null);
 
   const loadState = async () => {
     const { data, error } = await supabase.rpc('get_driver_dispatch_state');
@@ -155,6 +243,7 @@ export default function HomeScreen({ navigation }: Props) {
       pending_offers: rawPendingOffers,
       active_booking: rawActiveBooking,
     });
+    setLastUpdatedAt(new Date());
   };
 
   const refresh = async () => {
@@ -177,10 +266,22 @@ export default function HomeScreen({ navigation }: Props) {
       loadState().catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         console.log('[driver-home-poll]', message);
+        setBanner({
+          tone: 'warning',
+          message: 'Refresh issue detected. Using latest available driver state.',
+        });
       });
     }, 8000);
 
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setClockNow(Date.now());
+    }, 1000);
+
+    return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -229,6 +330,53 @@ export default function HomeScreen({ navigation }: Props) {
     state.active_booking?.booking_id,
   ]);
 
+  useEffect(() => {
+    if (locationSyncStatus === 'error') {
+      setBanner({
+        tone: 'warning',
+        message: 'Live location sync hit an issue. The app will keep retrying.',
+      });
+    }
+  }, [locationSyncStatus]);
+
+  useEffect(() => {
+    const currentOfferIds = state.pending_offers.map((offer) => offer.offer_id).sort();
+    const previousOfferIds = previousOfferIdsRef.current;
+    const currentBookingStatus = state.active_booking?.booking_status ?? null;
+
+    if (!initializedRef.current) {
+      initializedRef.current = true;
+      previousOfferIdsRef.current = currentOfferIds;
+      previousBookingStatusRef.current = currentBookingStatus;
+      return;
+    }
+
+    const newOfferCount = currentOfferIds.filter((id) => !previousOfferIds.includes(id)).length;
+
+    if (newOfferCount > 0) {
+      setBanner({
+        tone: 'success',
+        message: `${newOfferCount} new dispatch offer${newOfferCount > 1 ? 's' : ''} received.`,
+      });
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    }
+
+    if (
+      previousBookingStatusRef.current &&
+      currentBookingStatus &&
+      previousBookingStatusRef.current !== currentBookingStatus
+    ) {
+      setBanner({
+        tone: 'info',
+        message: `Trip status updated: ${titleize(currentBookingStatus)}.`,
+      });
+      void Haptics.selectionAsync().catch(() => {});
+    }
+
+    previousOfferIdsRef.current = currentOfferIds;
+    previousBookingStatusRef.current = currentBookingStatus;
+  }, [state.pending_offers, state.active_booking?.booking_status]);
+
   const handleSignOut = async () => {
     try {
       if (Boolean(state.driver?.is_online)) {
@@ -262,6 +410,12 @@ export default function HomeScreen({ navigation }: Props) {
       }
 
       await loadState();
+
+      if (!Boolean(state.driver.is_online)) {
+        setBanner({ tone: 'success', message: 'You are now online and ready to receive dispatch offers.' });
+      } else {
+        setBanner({ tone: 'info', message: 'You are now offline and hidden from dispatch.' });
+      }
     } catch (error) {
       Alert.alert('Update failed', error instanceof Error ? error.message : 'Could not update online status');
     } finally {
@@ -280,6 +434,9 @@ export default function HomeScreen({ navigation }: Props) {
 
       if (!data?.success) {
         Alert.alert('Offer unavailable', data?.message || 'This booking was already claimed.');
+      } else {
+        setBanner({ tone: 'success', message: 'Dispatch offer accepted successfully.' });
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       }
 
       await loadState();
@@ -300,6 +457,7 @@ export default function HomeScreen({ navigation }: Props) {
       if (error) throw error;
 
       await loadState();
+      setBanner({ tone: 'info', message: 'Dispatch offer rejected.' });
     } catch (error) {
       Alert.alert('Reject failed', error instanceof Error ? error.message : 'Could not reject offer');
     } finally {
@@ -328,12 +486,27 @@ export default function HomeScreen({ navigation }: Props) {
     }
   };
 
+  const callCustomer = async () => {
+    const phone = state.active_booking?.customer_phone;
+    if (!phone) {
+      Alert.alert('No phone number', 'Customer phone number is not available.');
+      return;
+    }
+
+    try {
+      await Linking.openURL(`tel:${phone}`);
+    } catch {
+      Alert.alert('Call failed', 'Could not open the dialer.');
+    }
+  };
+
   const activeAction = useMemo(
     () => (state.active_booking ? nextStatusAction(state.active_booking.booking_status) : null),
     [state.active_booking]
   );
 
   const syncColors = syncPillStyle(locationSyncStatus);
+  const activeStageIndex = currentTripStageIndex(state.active_booking?.booking_status);
 
   if (loading) {
     return (
@@ -346,6 +519,7 @@ export default function HomeScreen({ navigation }: Props) {
   }
 
   const driver = state.driver;
+  const activeBannerColors = banner ? bannerColors(banner.tone) : null;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -401,7 +575,26 @@ export default function HomeScreen({ navigation }: Props) {
               </Text>
             </View>
           </View>
+
+          <Text style={styles.lastUpdatedText}>
+            Last updated: {formatRelativeTime(lastUpdatedAt)}
+          </Text>
         </View>
+
+        {banner && activeBannerColors ? (
+          <View style={[styles.bannerCard, { backgroundColor: activeBannerColors.backgroundColor }]}>
+            <View style={styles.bannerContent}>
+              <Ionicons name={activeBannerColors.icon} size={18} color={activeBannerColors.color} />
+              <Text style={[styles.bannerText, { color: activeBannerColors.color }]}>
+                {banner.message}
+              </Text>
+            </View>
+
+            <Pressable onPress={() => setBanner(null)}>
+              <Ionicons name="close" size={18} color={activeBannerColors.color} />
+            </Pressable>
+          </View>
+        ) : null}
 
         {!driver ? (
           <View style={styles.stateCard}>
@@ -440,16 +633,13 @@ export default function HomeScreen({ navigation }: Props) {
               </Pressable>
             </View>
 
-            <View style={styles.quickLinksRow}>
-              <Pressable style={styles.quickLinkCard} onPress={() => navigation.navigate('Documents')}>
+            <View style={styles.quickLinksGrid}>
+              <Pressable style={styles.quickLinkCardHalf} onPress={() => navigation.navigate('Documents')}>
                 <Ionicons name="document-text-outline" size={18} color="#1d4ed8" />
                 <Text style={styles.quickLinkText}>Documents</Text>
               </Pressable>
 
-              <Pressable
-                style={styles.quickLinkCard}
-                onPress={() => navigation.navigate('TripMap')}
-              >
+              <Pressable style={styles.quickLinkCardHalf} onPress={() => navigation.navigate('TripMap')}>
                 <Ionicons
                   name="map-outline"
                   size={18}
@@ -460,10 +650,25 @@ export default function HomeScreen({ navigation }: Props) {
                 </Text>
               </Pressable>
 
-              <View style={styles.quickLinkCardMuted}>
-                <Ionicons name="wallet-outline" size={18} color="#64748b" />
-                <Text style={styles.quickLinkTextMuted}>Earnings next</Text>
-              </View>
+              <Pressable style={styles.quickLinkCardHalf} onPress={() => navigation.navigate('History')}>
+                <Ionicons name="time-outline" size={18} color="#7c3aed" />
+                <Text style={[styles.quickLinkText, { color: '#7c3aed' }]}>History</Text>
+              </Pressable>
+
+              <Pressable style={styles.quickLinkCardHalf} onPress={() => navigation.navigate('Earnings')}>
+                <Ionicons name="wallet-outline" size={18} color="#166534" />
+                <Text style={[styles.quickLinkText, { color: '#166534' }]}>Earnings</Text>
+              </Pressable>
+
+              <Pressable style={styles.quickLinkCardHalf} onPress={() => navigation.navigate('Profile')}>
+                <Ionicons name="person-circle-outline" size={18} color="#0f172a" />
+                <Text style={[styles.quickLinkText, { color: '#0f172a' }]}>Profile</Text>
+              </Pressable>
+
+              <Pressable style={styles.quickLinkCardHalf} onPress={() => navigation.navigate('Support')}>
+                <Ionicons name="warning-outline" size={18} color="#dc2626" />
+                <Text style={[styles.quickLinkText, { color: '#dc2626' }]}>Support</Text>
+              </Pressable>
             </View>
 
             {state.active_booking ? (
@@ -472,6 +677,37 @@ export default function HomeScreen({ navigation }: Props) {
                 <Text style={styles.activeTitle}>{state.active_booking.vehicle_type_name || 'Tow job'}</Text>
                 <Text style={styles.activeSubtitle}>
                   {titleize(state.active_booking.booking_status)}
+                </Text>
+
+                <View style={styles.progressWrap}>
+                  {TRIP_STAGES.map((stage, index) => {
+                    const completed = activeStageIndex >= index;
+                    const current = activeStageIndex === index;
+
+                    return (
+                      <View key={stage.key} style={styles.progressItem}>
+                        <View
+                          style={[
+                            styles.progressDot,
+                            completed && styles.progressDotCompleted,
+                            current && styles.progressDotCurrent,
+                          ]}
+                        />
+                        <Text
+                          style={[
+                            styles.progressLabel,
+                            completed && styles.progressLabelCompleted,
+                          ]}
+                        >
+                          {stage.label}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+
+                <Text style={styles.helperText}>
+                  {statusHelperText(state.active_booking.booking_status)}
                 </Text>
 
                 <View style={styles.routeBlock}>
@@ -489,14 +725,26 @@ export default function HomeScreen({ navigation }: Props) {
                     <Text style={styles.metaPillText}>Customer: {state.active_booking.customer_name || 'Customer'}</Text>
                   </View>
                   <View style={styles.metaPill}>
-                    <Text style={styles.metaPillText}>${Number(state.active_booking.quoted_amount || 0).toFixed(2)}</Text>
+                    <Text style={styles.metaPillText}>{money(state.active_booking.quoted_amount)}</Text>
                   </View>
                 </View>
 
-                <Pressable style={styles.secondaryTripButton} onPress={() => navigation.navigate('TripMap')}>
-                  <Ionicons name="map-outline" size={16} color="#1d4ed8" />
-                  <Text style={styles.secondaryTripButtonText}>Open trip map</Text>
-                </Pressable>
+                <View style={styles.actionRow}>
+                  <Pressable style={styles.secondaryTripButtonHalf} onPress={() => navigation.navigate('TripMap')}>
+                    <Ionicons name="map-outline" size={16} color="#1d4ed8" />
+                    <Text style={styles.secondaryTripButtonText}>Trip map</Text>
+                  </Pressable>
+
+                  <Pressable style={styles.secondaryTripButtonHalf} onPress={callCustomer}>
+                    <Ionicons name="call-outline" size={16} color="#1d4ed8" />
+                    <Text style={styles.secondaryTripButtonText}>Call</Text>
+                  </Pressable>
+
+                  <Pressable style={styles.secondaryTripButtonHalf} onPress={() => navigation.navigate('Support')}>
+                    <Ionicons name="warning-outline" size={16} color="#dc2626" />
+                    <Text style={[styles.secondaryTripButtonText, { color: '#dc2626' }]}>Issue</Text>
+                  </Pressable>
+                </View>
 
                 {activeAction ? (
                   <Pressable
@@ -554,7 +802,7 @@ export default function HomeScreen({ navigation }: Props) {
               state.pending_offers.map((offer) => (
                 <View key={offer.offer_id} style={styles.offerCard}>
                   <View style={styles.offerTopRow}>
-                    <View>
+                    <View style={{ flex: 1 }}>
                       <Text style={styles.offerTitle}>{offer.vehicle_type_name || 'Tow offer'}</Text>
                       <Text style={styles.offerSubtitle}>
                         {(offer.customer_name || 'Customer')} • {offer.created_at ? new Date(offer.created_at).toLocaleString() : 'Now'}
@@ -562,7 +810,16 @@ export default function HomeScreen({ navigation }: Props) {
                     </View>
 
                     <View style={styles.priceChip}>
-                      <Text style={styles.priceChipText}>${Number(offer.quoted_amount || 0).toFixed(2)}</Text>
+                      <Text style={styles.priceChipText}>{money(offer.quoted_amount)}</Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.offerAlertRow}>
+                    <View style={styles.offerCountdownPill}>
+                      <Ionicons name="time-outline" size={14} color="#b45309" />
+                      <Text style={styles.offerCountdownText}>
+                        Expires in {formatCountdown(offer.expires_at, clockNow)}
+                      </Text>
                     </View>
                   </View>
 
@@ -574,12 +831,6 @@ export default function HomeScreen({ navigation }: Props) {
                   <View style={styles.routeBlock}>
                     <Text style={styles.routeLabel}>Dropoff</Text>
                     <Text style={styles.routeValue}>{offer.drop_address || 'Dropoff not available'}</Text>
-                  </View>
-
-                  <View style={styles.offerFooter}>
-                    <Text style={styles.expiryText}>
-                      Expires: {offer.expires_at ? new Date(offer.expires_at).toLocaleTimeString() : 'Soon'}
-                    </Text>
                   </View>
 
                   <View style={styles.offerActions}>
@@ -626,33 +877,52 @@ const styles = StyleSheet.create({
   heroStatsRow: { flexDirection: 'row', flexWrap: 'wrap' },
   heroStatPill: { backgroundColor: 'rgba(125,211,252,0.12)', borderWidth: 1, borderColor: 'rgba(125,211,252,0.2)', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8, marginRight: 10, marginBottom: 10 },
   heroStatText: { color: '#dbeafe', fontSize: 12, fontWeight: '800' },
+  lastUpdatedText: { color: '#94a3b8', fontSize: 12, fontWeight: '700', marginTop: 4 },
+  bannerCard: {
+    borderRadius: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    marginBottom: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    ...shadowCard,
+  },
+  bannerContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    paddingRight: 8,
+  },
+  bannerText: {
+    fontSize: 13,
+    fontWeight: '800',
+    marginLeft: 10,
+    flex: 1,
+    lineHeight: 18,
+  },
   controlsRow: { marginBottom: 14 },
   toggleButton: { borderRadius: 18, paddingVertical: 16, alignItems: 'center', ...shadowCard },
   toggleButtonOnline: { backgroundColor: '#ef4444' },
   toggleButtonOffline: { backgroundColor: '#16a34a' },
   toggleButtonText: { color: '#ffffff', fontSize: 15, fontWeight: '800' },
-  quickLinksRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 10, marginBottom: 16 },
-  quickLinkCard: {
-    flex: 1,
-    backgroundColor: '#ffffff',
-    borderRadius: 18,
-    paddingVertical: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...shadowCard,
+  quickLinksGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    marginBottom: 16,
   },
-  quickLinkCardMuted: {
-    flex: 1,
+  quickLinkCardHalf: {
+    width: '48%',
     backgroundColor: '#ffffff',
     borderRadius: 18,
-    paddingVertical: 14,
+    paddingVertical: 16,
     alignItems: 'center',
     justifyContent: 'center',
-    opacity: 0.82,
+    marginBottom: 12,
     ...shadowCard,
   },
   quickLinkText: { color: '#1d4ed8', fontSize: 12, fontWeight: '800', marginTop: 8 },
-  quickLinkTextMuted: { color: '#64748b', fontSize: 12, fontWeight: '800', marginTop: 8 },
   pendingCard: { backgroundColor: '#ffffff', borderRadius: 24, padding: 20, marginBottom: 16, ...shadowCard },
   pendingTitle: { color: '#0f172a', fontSize: 22, fontWeight: '800', marginBottom: 8 },
   pendingText: { color: '#475569', fontSize: 14, lineHeight: 22, marginBottom: 16 },
@@ -670,12 +940,57 @@ const styles = StyleSheet.create({
   cardEyebrow: { color: '#16a34a', fontSize: 12, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 },
   activeTitle: { color: '#0f172a', fontSize: 22, fontWeight: '800', marginBottom: 4 },
   activeSubtitle: { color: '#1d4ed8', fontSize: 14, fontWeight: '800', marginBottom: 14 },
+  progressWrap: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+    marginTop: 2,
+  },
+  progressItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  progressDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#cbd5e1',
+    marginBottom: 8,
+  },
+  progressDotCompleted: {
+    backgroundColor: '#16a34a',
+  },
+  progressDotCurrent: {
+    transform: [{ scale: 1.25 }],
+    backgroundColor: '#2563eb',
+  },
+  progressLabel: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  progressLabelCompleted: {
+    color: '#0f172a',
+  },
+  helperText: {
+    color: '#475569',
+    fontSize: 13,
+    lineHeight: 20,
+    marginBottom: 14,
+  },
   routeBlock: { marginBottom: 12 },
   routeLabel: { color: '#64748b', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', marginBottom: 4 },
   routeValue: { color: '#0f172a', fontSize: 15, fontWeight: '700', lineHeight: 21 },
   metaRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 14 },
   metaPill: { backgroundColor: '#f8fafc', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 10, marginRight: 10, marginBottom: 10 },
   metaPillText: { color: '#334155', fontSize: 12, fontWeight: '800' },
+  actionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginBottom: 12,
+  },
   secondaryTripButton: {
     backgroundColor: '#eff6ff',
     borderRadius: 16,
@@ -685,9 +1000,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     marginBottom: 12,
   },
+  secondaryTripButtonHalf: {
+    flex: 1,
+    backgroundColor: '#eff6ff',
+    borderRadius: 16,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+  },
   secondaryTripButtonText: {
     color: '#1d4ed8',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '800',
     marginLeft: 8,
   },
@@ -699,14 +1023,28 @@ const styles = StyleSheet.create({
   stateCard: { backgroundColor: '#ffffff', borderRadius: 22, padding: 20, alignItems: 'center', marginBottom: 16, ...shadowCard },
   stateText: { color: '#334155', fontSize: 14, fontWeight: '700', textAlign: 'center' },
   offerCard: { backgroundColor: '#ffffff', borderRadius: 24, padding: 18, marginBottom: 14, ...shadowCard },
-  offerTopRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, marginBottom: 14, alignItems: 'flex-start' },
+  offerTopRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, marginBottom: 12, alignItems: 'flex-start' },
   offerTitle: { color: '#0f172a', fontSize: 18, fontWeight: '800', marginBottom: 4 },
   offerSubtitle: { color: '#64748b', fontSize: 13, fontWeight: '600' },
   priceChip: { backgroundColor: '#eff6ff', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
   priceChipText: { color: '#1d4ed8', fontSize: 13, fontWeight: '800' },
-  offerFooter: { marginBottom: 12 },
-  expiryText: { color: '#b45309', fontSize: 12, fontWeight: '800' },
-  offerActions: { flexDirection: 'row', justifyContent: 'space-between', gap: 12 },
+  offerAlertRow: { marginBottom: 12 },
+  offerCountdownPill: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#fef3c7',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  offerCountdownText: {
+    color: '#b45309',
+    fontSize: 12,
+    fontWeight: '800',
+    marginLeft: 8,
+  },
+  offerActions: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, marginTop: 6 },
   acceptButton: { flex: 1, backgroundColor: '#16a34a', borderRadius: 16, paddingVertical: 14, alignItems: 'center' },
   acceptButtonText: { color: '#ffffff', fontSize: 14, fontWeight: '800' },
   rejectButton: { flex: 1, backgroundColor: '#fee2e2', borderRadius: 16, paddingVertical: 14, alignItems: 'center' },

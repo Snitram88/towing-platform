@@ -35,10 +35,6 @@ type ActiveBooking = {
   created_at?: string | null;
 };
 
-type DispatchState = {
-  active_booking: ActiveBooking | null;
-};
-
 const shadowCard = {
   shadowColor: '#020617',
   shadowOpacity: 0.14,
@@ -51,6 +47,14 @@ const DEFAULT_LAGOS = {
   latitude: 6.5244,
   longitude: 3.3792,
 };
+
+const TRIP_STAGES = [
+  { key: 'driver_assigned', label: 'Assigned' },
+  { key: 'driver_en_route', label: 'En route' },
+  { key: 'driver_arrived', label: 'Arrived' },
+  { key: 'in_service', label: 'Towing' },
+  { key: 'completed', label: 'Completed' },
+];
 
 function titleize(value?: string | null) {
   if (!value) return 'Standby';
@@ -75,6 +79,32 @@ function nextStatusAction(status?: string | null) {
 function toPoint(lat?: number | null, lng?: number | null): MapPoint | null {
   if (lat == null || lng == null) return null;
   return { latitude: lat, longitude: lng };
+}
+
+function money(value?: number | null) {
+  return `$${Number(value || 0).toFixed(2)}`;
+}
+
+function currentTripStageIndex(status?: string | null) {
+  const idx = TRIP_STAGES.findIndex((stage) => stage.key === status);
+  return idx === -1 ? -1 : idx;
+}
+
+function statusHelperText(status?: string | null) {
+  switch (status) {
+    case 'driver_assigned':
+      return 'Head toward the pickup point and prepare to start navigation.';
+    case 'driver_en_route':
+      return 'You are en route to the customer pickup location.';
+    case 'driver_arrived':
+      return 'Confirm arrival, load the vehicle, and begin the tow.';
+    case 'in_service':
+      return 'Vehicle is secured. Continue toward the dropoff destination.';
+    case 'completed':
+      return 'Trip completed successfully.';
+    default:
+      return 'Standby mode active. Waiting for the next dispatch.';
+  }
 }
 
 export default function TripMapScreen({ navigation }: { navigation: any }) {
@@ -117,7 +147,7 @@ export default function TripMapScreen({ navigation }: { navigation: any }) {
 
   useEffect(() => {
     const interval = setInterval(() => {
-      loadState().catch((error) => console.error(error));
+      loadState().catch((error) => console.log('[trip-map-poll]', error instanceof Error ? error.message : String(error)));
     }, 8000);
 
     return () => clearInterval(interval);
@@ -164,7 +194,7 @@ export default function TripMapScreen({ navigation }: { navigation: any }) {
     };
 
     startLocation().catch((error) => {
-      console.error(error);
+      console.log('[trip-map-location]', error instanceof Error ? error.message : String(error));
       setDriverPoint(DEFAULT_LAGOS);
       setLocationReady(true);
     });
@@ -209,7 +239,7 @@ export default function TripMapScreen({ navigation }: { navigation: any }) {
 
     const timer = setTimeout(() => {
       mapRef.current?.fitToCoordinates(points, {
-        edgePadding: { top: 120, right: 50, bottom: 320, left: 50 },
+        edgePadding: { top: 120, right: 50, bottom: 340, left: 50 },
         animated: true,
       });
     }, 300);
@@ -278,7 +308,7 @@ export default function TripMapScreen({ navigation }: { navigation: any }) {
     if (points.length === 0) return;
 
     mapRef.current?.fitToCoordinates(points, {
-      edgePadding: { top: 120, right: 50, bottom: 320, left: 50 },
+      edgePadding: { top: 120, right: 50, bottom: 340, left: 50 },
       animated: true,
     });
   };
@@ -306,6 +336,8 @@ export default function TripMapScreen({ navigation }: { navigation: any }) {
       </SafeAreaView>
     );
   }
+
+  const activeStageIndex = currentTripStageIndex(activeBooking?.booking_status);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -398,6 +430,39 @@ export default function TripMapScreen({ navigation }: { navigation: any }) {
         <View style={styles.bottomCard}>
           {activeBooking ? (
             <>
+              <View style={styles.statusHeaderRow}>
+                <Text style={styles.standbyTitle}>Trip in progress</Text>
+                <View style={styles.statusChip}>
+                  <Text style={styles.statusChipText}>{titleize(activeBooking.booking_status)}</Text>
+                </View>
+              </View>
+
+              <View style={styles.progressWrap}>
+                {TRIP_STAGES.map((stage, index) => {
+                  const completed = activeStageIndex >= index;
+                  const current = activeStageIndex === index;
+
+                  return (
+                    <View key={stage.key} style={styles.progressItem}>
+                      <View
+                        style={[
+                          styles.progressDot,
+                          completed && styles.progressDotCompleted,
+                          current && styles.progressDotCurrent,
+                        ]}
+                      />
+                      <Text style={[styles.progressLabel, completed && styles.progressLabelCompleted]}>
+                        {stage.label}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.helperText}>
+                {statusHelperText(activeBooking.booking_status)}
+              </Text>
+
               <View style={styles.addressBlock}>
                 <Text style={styles.addressLabel}>Pickup</Text>
                 <Text style={styles.addressValue}>{activeBooking.pickup_address || 'Pickup not available'}</Text>
@@ -413,19 +478,19 @@ export default function TripMapScreen({ navigation }: { navigation: any }) {
                   <Text style={styles.metaPillText}>Customer: {activeBooking.customer_name || 'Customer'}</Text>
                 </View>
                 <View style={styles.metaPill}>
-                  <Text style={styles.metaPillText}>${Number(activeBooking.quoted_amount || 0).toFixed(2)}</Text>
+                  <Text style={styles.metaPillText}>{money(activeBooking.quoted_amount)}</Text>
                 </View>
               </View>
 
               <View style={styles.actionRow}>
                 <Pressable style={styles.secondaryButton} onPress={openExternalNavigation}>
                   <Ionicons name="navigate-outline" size={16} color="#1d4ed8" />
-                  <Text style={styles.secondaryButtonText}>Open navigation</Text>
+                  <Text style={styles.secondaryButtonText}>Navigate</Text>
                 </Pressable>
 
                 <Pressable style={styles.secondaryButton} onPress={callCustomer}>
                   <Ionicons name="call-outline" size={16} color="#1d4ed8" />
-                  <Text style={styles.secondaryButtonText}>Call customer</Text>
+                  <Text style={styles.secondaryButtonText}>Call</Text>
                 </Pressable>
               </View>
 
@@ -444,14 +509,14 @@ export default function TripMapScreen({ navigation }: { navigation: any }) {
               ) : null}
 
               <Text style={styles.footerNote}>
-                In-app traffic-aware routing comes next when the paid map routing layer is enabled.
+                In-app traffic-aware routing can later replace external navigation when the paid routing layer is enabled.
               </Text>
             </>
           ) : (
             <>
               <Text style={styles.standbyTitle}>Standby map active</Text>
               <Text style={styles.standbyText}>
-                This screen now shows the driver’s live position even without an active booking. Once a job is assigned, pickup and dropoff markers will appear here automatically.
+                This screen shows the driver’s live position while waiting for dispatch. Once a job is accepted, the pickup and dropoff flow will appear here automatically.
               </Text>
 
               <View style={styles.metaRow}>
@@ -569,6 +634,24 @@ const styles = StyleSheet.create({
     padding: 18,
     ...shadowCard,
   },
+  statusHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  statusChip: {
+    backgroundColor: '#eff6ff',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  statusChipText: {
+    color: '#1d4ed8',
+    fontSize: 12,
+    fontWeight: '800',
+  },
   standbyTitle: {
     color: '#0f172a',
     fontSize: 22,
@@ -579,6 +662,44 @@ const styles = StyleSheet.create({
     color: '#475569',
     fontSize: 14,
     lineHeight: 22,
+    marginBottom: 14,
+  },
+  progressWrap: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  progressItem: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  progressDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#cbd5e1',
+    marginBottom: 8,
+  },
+  progressDotCompleted: {
+    backgroundColor: '#16a34a',
+  },
+  progressDotCurrent: {
+    backgroundColor: '#2563eb',
+    transform: [{ scale: 1.25 }],
+  },
+  progressLabel: {
+    color: '#94a3b8',
+    fontSize: 11,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  progressLabelCompleted: {
+    color: '#0f172a',
+  },
+  helperText: {
+    color: '#475569',
+    fontSize: 13,
+    lineHeight: 20,
     marginBottom: 14,
   },
   addressBlock: {
