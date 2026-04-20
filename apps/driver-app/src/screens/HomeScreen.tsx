@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Image,
   Linking,
   Pressable,
   RefreshControl,
@@ -26,6 +27,9 @@ type DriverInfo = {
   full_name?: string | null;
   email?: string | null;
   phone?: string | null;
+  avatar_url?: string | null;
+  rating_average?: number | null;
+  rating_count?: number | null;
 };
 
 type PendingOffer = {
@@ -207,6 +211,29 @@ function statusHelperText(status?: string | null) {
   }
 }
 
+function initialsFromName(name?: string | null, fallback = 'D') {
+  const safe = (name || '').trim();
+  if (!safe) return fallback;
+
+  const parts = safe.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase();
+}
+
+function RatingStars({ value }: { value: number }) {
+  const rounded = Math.round(value);
+
+  return (
+    <View style={styles.ratingStarsRow}>
+      {[1, 2, 3, 4, 5].map((star) => (
+        <Text key={star} style={styles.ratingStar}>
+          {star <= rounded ? '★' : '☆'}
+        </Text>
+      ))}
+    </View>
+  );
+}
+
 export default function HomeScreen({ navigation }: Props) {
   const [loading, setLoading] = useState(true);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -229,7 +256,7 @@ export default function HomeScreen({ navigation }: Props) {
 
     if (error) throw error;
 
-    const rawDriver = data?.driver && data.driver.profile_id ? (data.driver as DriverInfo) : null;
+    let rawDriver = data?.driver && data.driver.profile_id ? ({ ...data.driver } as DriverInfo) : null;
     const rawPendingOffers = Array.isArray(data?.pending_offers)
       ? (data.pending_offers as PendingOffer[])
       : [];
@@ -237,6 +264,34 @@ export default function HomeScreen({ navigation }: Props) {
       data?.active_booking && data.active_booking.booking_id
         ? (data.active_booking as ActiveBooking)
         : null;
+
+    if (rawDriver?.profile_id) {
+      const [
+        { data: profileMeta, error: profileMetaError },
+        { data: driverMeta, error: driverMetaError },
+      ] = await Promise.all([
+        supabase
+          .from('profiles')
+          .select('avatar_url')
+          .eq('id', rawDriver.profile_id)
+          .maybeSingle(),
+        supabase
+          .from('drivers')
+          .select('rating_average, rating_count')
+          .eq('profile_id', rawDriver.profile_id)
+          .maybeSingle(),
+      ]);
+
+      if (profileMetaError) throw profileMetaError;
+      if (driverMetaError) throw driverMetaError;
+
+      rawDriver = {
+        ...rawDriver,
+        avatar_url: profileMeta?.avatar_url ?? null,
+        rating_average: driverMeta?.rating_average ?? 0,
+        rating_count: driverMeta?.rating_count ?? 0,
+      };
+    }
 
     setState({
       driver: rawDriver,
@@ -258,7 +313,7 @@ export default function HomeScreen({ navigation }: Props) {
   };
 
   useEffect(() => {
-    refresh();
+    void refresh();
   }, []);
 
   useEffect(() => {
@@ -507,6 +562,11 @@ export default function HomeScreen({ navigation }: Props) {
 
   const syncColors = syncPillStyle(locationSyncStatus);
   const activeStageIndex = currentTripStageIndex(state.active_booking?.booking_status);
+  const driver = state.driver;
+  const activeBannerColors = banner ? bannerColors(banner.tone) : null;
+  const driverRatingAverage = Number(driver?.rating_average ?? 0);
+  const driverRatingCount = Number(driver?.rating_count ?? 0);
+  const driverDisplayName = driver?.full_name || driver?.email || 'Driver';
 
   if (loading) {
     return (
@@ -517,9 +577,6 @@ export default function HomeScreen({ navigation }: Props) {
       </SafeAreaView>
     );
   }
-
-  const driver = state.driver;
-  const activeBannerColors = banner ? bannerColors(banner.tone) : null;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -543,13 +600,43 @@ export default function HomeScreen({ navigation }: Props) {
             </Pressable>
           </View>
 
-          <View style={styles.heroStatsRow}>
-            <View style={styles.heroStatPill}>
-              <Text style={styles.heroStatText}>
-                {driver?.full_name || driver?.email || 'Driver'}
-              </Text>
-            </View>
+          {driver ? (
+            <View style={styles.driverSummaryCard}>
+              {driver.avatar_url ? (
+                <Image source={{ uri: driver.avatar_url }} style={styles.driverAvatarImage} />
+              ) : (
+                <View style={styles.driverAvatarFallback}>
+                  <Text style={styles.driverAvatarFallbackText}>
+                    {initialsFromName(driverDisplayName, 'D')}
+                  </Text>
+                </View>
+              )}
 
+              <View style={styles.driverSummaryTextWrap}>
+                <View style={styles.driverSummaryNameRow}>
+                  <Text style={styles.driverSummaryName}>{driverDisplayName}</Text>
+                  {driver.verified_badge || driver.verification_status === 'approved' ? (
+                    <View style={styles.verifiedBadge}>
+                      <Text style={styles.verifiedBadgeText}>Verified</Text>
+                    </View>
+                  ) : null}
+                </View>
+
+                {driverRatingCount > 0 ? (
+                  <>
+                    <RatingStars value={driverRatingAverage} />
+                    <Text style={styles.driverSummaryMeta}>
+                      {driverRatingAverage.toFixed(1)} • {driverRatingCount} rating{driverRatingCount === 1 ? '' : 's'}
+                    </Text>
+                  </>
+                ) : (
+                  <Text style={styles.driverSummaryMeta}>No ratings yet</Text>
+                )}
+              </View>
+            </View>
+          ) : null}
+
+          <View style={styles.heroStatsRow}>
             <View
               style={[
                 styles.heroStatPill,
@@ -572,6 +659,12 @@ export default function HomeScreen({ navigation }: Props) {
             >
               <Text style={[styles.heroStatText, { color: syncColors.color }]}>
                 {syncLabel(locationSyncStatus)}
+              </Text>
+            </View>
+
+            <View style={styles.heroStatPill}>
+              <Text style={styles.heroStatText}>
+                {titleize(driver?.verification_status)}
               </Text>
             </View>
           </View>
@@ -874,10 +967,94 @@ const styles = StyleSheet.create({
   heroTitle: { color: '#ffffff', fontSize: 30, fontWeight: '800', marginBottom: 8 },
   heroSubtitle: { color: '#cbd5e1', fontSize: 14, lineHeight: 21, maxWidth: 270 },
   signOutButton: { width: 42, height: 42, borderRadius: 15, backgroundColor: 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center' },
+
+  driverSummaryCard: {
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 22,
+    padding: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  driverAvatarImage: {
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: '#1e293b',
+    marginRight: 14,
+  },
+  driverAvatarFallback: {
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: '#2563eb',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 14,
+  },
+  driverAvatarFallbackText: {
+    color: '#ffffff',
+    fontSize: 22,
+    fontWeight: '800',
+  },
+  driverSummaryTextWrap: {
+    flex: 1,
+  },
+  driverSummaryNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    marginBottom: 6,
+  },
+  driverSummaryName: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: '800',
+    marginRight: 8,
+  },
+  verifiedBadge: {
+    backgroundColor: 'rgba(34,197,94,0.16)',
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  verifiedBadgeText: {
+    color: '#dcfce7',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  driverSummaryMeta: {
+    color: '#cbd5e1',
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 6,
+  },
+  ratingStarsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  ratingStar: {
+    color: '#f59e0b',
+    fontSize: 16,
+    marginRight: 2,
+  },
+
   heroStatsRow: { flexDirection: 'row', flexWrap: 'wrap' },
-  heroStatPill: { backgroundColor: 'rgba(125,211,252,0.12)', borderWidth: 1, borderColor: 'rgba(125,211,252,0.2)', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8, marginRight: 10, marginBottom: 10 },
+  heroStatPill: {
+    backgroundColor: 'rgba(125,211,252,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(125,211,252,0.2)',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginRight: 10,
+    marginBottom: 10,
+  },
   heroStatText: { color: '#dbeafe', fontSize: 12, fontWeight: '800' },
   lastUpdatedText: { color: '#94a3b8', fontSize: 12, fontWeight: '700', marginTop: 4 },
+
   bannerCard: {
     borderRadius: 18,
     paddingHorizontal: 14,
@@ -901,11 +1078,13 @@ const styles = StyleSheet.create({
     flex: 1,
     lineHeight: 18,
   },
+
   controlsRow: { marginBottom: 14 },
   toggleButton: { borderRadius: 18, paddingVertical: 16, alignItems: 'center', ...shadowCard },
   toggleButtonOnline: { backgroundColor: '#ef4444' },
   toggleButtonOffline: { backgroundColor: '#16a34a' },
   toggleButtonText: { color: '#ffffff', fontSize: 15, fontWeight: '800' },
+
   quickLinksGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -923,6 +1102,7 @@ const styles = StyleSheet.create({
     ...shadowCard,
   },
   quickLinkText: { color: '#1d4ed8', fontSize: 12, fontWeight: '800', marginTop: 8 },
+
   pendingCard: { backgroundColor: '#ffffff', borderRadius: 24, padding: 20, marginBottom: 16, ...shadowCard },
   pendingTitle: { color: '#0f172a', fontSize: 22, fontWeight: '800', marginBottom: 8 },
   pendingText: { color: '#475569', fontSize: 14, lineHeight: 22, marginBottom: 16 },
@@ -933,6 +1113,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   documentsButtonText: { color: '#ffffff', fontSize: 15, fontWeight: '800' },
+
   activeCard: { backgroundColor: '#ffffff', borderRadius: 24, padding: 18, marginBottom: 18, ...shadowCard },
   standbyCard: { backgroundColor: '#ffffff', borderRadius: 24, padding: 18, marginBottom: 18, ...shadowCard },
   standbyTitle: { color: '#0f172a', fontSize: 22, fontWeight: '800', marginBottom: 8 },
@@ -940,6 +1121,7 @@ const styles = StyleSheet.create({
   cardEyebrow: { color: '#16a34a', fontSize: 12, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 },
   activeTitle: { color: '#0f172a', fontSize: 22, fontWeight: '800', marginBottom: 4 },
   activeSubtitle: { color: '#1d4ed8', fontSize: 14, fontWeight: '800', marginBottom: 14 },
+
   progressWrap: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -979,12 +1161,15 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     marginBottom: 14,
   },
+
   routeBlock: { marginBottom: 12 },
   routeLabel: { color: '#64748b', fontSize: 12, fontWeight: '700', textTransform: 'uppercase', marginBottom: 4 },
   routeValue: { color: '#0f172a', fontSize: 15, fontWeight: '700', lineHeight: 21 },
+
   metaRow: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 14 },
   metaPill: { backgroundColor: '#f8fafc', borderRadius: 999, paddingHorizontal: 12, paddingVertical: 10, marginRight: 10, marginBottom: 10 },
   metaPillText: { color: '#334155', fontSize: 12, fontWeight: '800' },
+
   actionRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1017,11 +1202,14 @@ const styles = StyleSheet.create({
   },
   primaryButton: { backgroundColor: '#16a34a', borderRadius: 18, paddingVertical: 16, alignItems: 'center' },
   primaryButtonText: { color: '#ffffff', fontSize: 15, fontWeight: '800' },
+
   sectionHeader: { marginBottom: 12 },
   sectionTitle: { color: '#ffffff', fontSize: 22, fontWeight: '800', marginBottom: 4 },
   sectionSubtitle: { color: '#94a3b8', fontSize: 13 },
+
   stateCard: { backgroundColor: '#ffffff', borderRadius: 22, padding: 20, alignItems: 'center', marginBottom: 16, ...shadowCard },
   stateText: { color: '#334155', fontSize: 14, fontWeight: '700', textAlign: 'center' },
+
   offerCard: { backgroundColor: '#ffffff', borderRadius: 24, padding: 18, marginBottom: 14, ...shadowCard },
   offerTopRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, marginBottom: 12, alignItems: 'flex-start' },
   offerTitle: { color: '#0f172a', fontSize: 18, fontWeight: '800', marginBottom: 4 },

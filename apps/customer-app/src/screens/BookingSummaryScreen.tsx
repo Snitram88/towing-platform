@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -8,6 +8,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import * as WebBrowser from 'expo-web-browser';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -38,6 +39,14 @@ type Props = {
   };
 };
 
+type PaymentMethod = 'wallet' | 'paystack' | 'cash';
+
+type WalletPreview = {
+  balance: number;
+  currency: string;
+  ready: boolean;
+};
+
 const shadowCard = {
   shadowColor: '#020617',
   shadowOpacity: 0.14,
@@ -46,90 +55,280 @@ const shadowCard = {
   elevation: 4,
 };
 
+function formatNaira(value?: number | null) {
+  return `₦${Number(value || 0).toFixed(2)}`;
+}
+
 export default function BookingSummaryScreen({ navigation, route }: Props) {
-  const { pickupAddress, pickupPoint, dropAddress, dropPoint, distanceKm, durationMin, estimate, vehicle } = route.params;
+  const {
+    pickupAddress,
+    pickupPoint,
+    dropAddress,
+    dropPoint,
+    distanceKm,
+    durationMin,
+    estimate,
+    vehicle,
+  } = route.params;
+
   const [submitting, setSubmitting] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('paystack');
+  const [walletPreview, setWalletPreview] = useState<WalletPreview>({
+    balance: 0,
+    currency: 'NGN',
+    ready: false,
+  });
+
+  const normalizedEstimate = useMemo(() => Number(estimate.toFixed(2)), [estimate]);
+
+  const loadWalletPreview = useCallback(async () => {
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser();
+
+    if (authError || !user) return;
+
+    const walletRes = await supabase
+      .from('customer_wallets')
+      .select('balance, currency')
+      .eq('customer_id', user.id)
+      .maybeSingle();
+
+    if (!walletRes.error && walletRes.data) {
+      setWalletPreview({
+        balance: Number(walletRes.data.balance ?? 0),
+        currency: walletRes.data.currency ?? 'NGN',
+        ready: true,
+      });
+    } else {
+      setWalletPreview({
+        balance: 0,
+        currency: 'NGN',
+        ready: false,
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadWalletPreview();
+  }, [loadWalletPreview]);
+
+  const startBookingPaystackPayment = useCallback(async (bookingId: string) => {
+  const {
+    data: { session },
+    error: sessionError,
+  } = await supabase.auth.getSession();
+
+  if (sessionError) {
+    throw new Error(sessionError.message);
+  }
+
+  if (!session?.access_token) {
+    throw new Error('No active session found. Please sign in again.');
+  }
+
+  const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+  const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error('Missing Supabase app environment values.');
+  }
+
+  const response = await fetch(
+    `${supabaseUrl}/functions/v1/paystack-initialize-booking-payment`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: supabaseAnonKey,
+        Authorization: `Bearer ${session.access_token}`,
+      },
+      body: JSON.stringify({
+        booking_id: bookingId,
+      }),
+    }
+  );
+
+  const responseJson = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      responseJson?.error ||
+        responseJson?.message ||
+        `Booking payment init failed with status ${response.status}`
+    );
+  }
+
+  const authorizationUrl = responseJson?.authorization_url;
+
+  if (!authorizationUrl) {
+    throw new Error('No Paystack authorization URL was returned.');
+  }
+
+  return {
+    authorizationUrl,
+    reference: responseJson?.reference ?? null,
+  };
+}, []);
 
   const handleRequest = async () => {
     setSubmitting(true);
 
-    const userResult = await supabase.auth.getUser();
-    const user = userResult.data.user;
+    try {
+      const userResult = await supabase.auth.getUser();
+      const user = userResult.data.user;
 
-    if (!user) {
+      if (!user) {
+        Alert.alert('Session expired', 'Please sign in again.');
+        return;
+      }
+
+      if (paymentMethod === 'wallet') {
+        const walletRes = await supabase
+          .from('customer_wallets')
+          .select('balance, currency')
+          .eq('customer_id', user.id)
+          .maybeSingle();
+
+        const liveWalletBalance = Number(walletRes.data?.balance ?? 0);
+
+        if (liveWalletBalance < normalizedEstimate) {
+          Alert.alert(
+            'Insufficient wallet balance',
+            `Your wallet balance is ${formatNaira(
+              liveWalletBalance
+            )}. Please top up your wallet or switch to Paystack or cash.`
+          );
+          return;
+        }
+      }
+
+      const { data: bookingRow, error: bookingError } = await supabase
+        .from('bookings')
+        .insert({
+          customer_id: user.id,
+          vehicle_type_id: vehicle.id,
+          booking_status: 'searching_driver',
+          payment_status: paymentMethod === 'paystack' ? 'pending' : 'unpaid',
+          payment_method: paymentMethod,
+          pickup_address: pickupAddress,
+          pickup_lat: pickupPoint.latitude,
+          pickup_lng: pickupPoint.longitude,
+          drop_address: dropAddress,
+          drop_lat: dropPoint.latitude,
+          drop_lng: dropPoint.longitude,
+          estimated_distance_meters: Math.round(distanceKm * 1000),
+          estimated_duration_seconds: Math.round(durationMin * 60),
+          quoted_amount: normalizedEstimate,
+        })
+        .select('id')
+        .single();
+
+      if (bookingError || !bookingRow) {
+        Alert.alert('Booking failed', bookingError?.message || 'Could not create booking.');
+        return;
+      }
+
+      if (paymentMethod === 'wallet') {
+        const { data: walletPayResult, error: walletPayError } = await supabase.rpc(
+          'pay_customer_booking_with_wallet',
+          {
+            p_booking_id: bookingRow.id,
+            p_customer_id: user.id,
+          }
+        );
+
+        if (walletPayError || !walletPayResult?.success) {
+          await supabase
+            .from('bookings')
+            .delete()
+            .eq('id', bookingRow.id)
+            .eq('customer_id', user.id);
+
+          Alert.alert(
+            'Wallet payment failed',
+            walletPayError?.message ||
+              walletPayResult?.message ||
+              'Could not complete wallet payment for this booking.'
+          );
+          return;
+        }
+
+        await loadWalletPreview();
+      }
+
+      await supabase.from('booking_status_history').insert({
+        booking_id: bookingRow.id,
+        new_status: 'searching_driver',
+        changed_by: user.id,
+        note: `Customer created booking from mobile app. Payment method: ${paymentMethod}.`,
+      });
+
+      if (paymentMethod === 'paystack') {
+        const init = await startBookingPaystackPayment(bookingRow.id);
+
+        await WebBrowser.openBrowserAsync(init.authorizationUrl);
+
+        Alert.alert(
+          'Payment started',
+          'Complete your Paystack payment. Dispatch will begin automatically after payment is confirmed.'
+        );
+
+        navigation.navigate('TrackingDemo', {
+          bookingId: bookingRow.id,
+          pickupAddress,
+          pickupPoint,
+          dropAddress,
+          dropPoint,
+          distanceKm,
+          durationMin,
+          estimate: normalizedEstimate,
+          vehicle,
+          paymentMethod,
+        });
+        return;
+      }
+
+      const { data: dispatchResult, error: dispatchError } = await supabase.rpc('dispatch_booking', {
+        p_booking_id: bookingRow.id,
+      });
+
+      if (dispatchError) {
+        Alert.alert(
+          'Booking created',
+          'Your booking was created, but auto-dispatch could not start yet. Admin can still intervene.'
+        );
+      } else if ((dispatchResult?.offered_count ?? 0) === 0) {
+        Alert.alert(
+          'Booking created',
+          'No approved online drivers were available right now. Your booking stays active while the system keeps searching.'
+        );
+      } else {
+        Alert.alert(
+          'Booking created',
+          `Dispatch started and ${dispatchResult.offered_count} driver offer(s) were sent.`
+        );
+      }
+
+      navigation.navigate('TrackingDemo', {
+        bookingId: bookingRow.id,
+        pickupAddress,
+        pickupPoint,
+        dropAddress,
+        dropPoint,
+        distanceKm,
+        durationMin,
+        estimate: normalizedEstimate,
+        vehicle,
+        paymentMethod,
+      });
+    } finally {
       setSubmitting(false);
-      Alert.alert('Session expired', 'Please sign in again.');
-      return;
     }
-
-    const { data: bookingRow, error: bookingError } = await supabase
-      .from('bookings')
-      .insert({
-        customer_id: user.id,
-        vehicle_type_id: vehicle.id,
-        booking_status: 'searching_driver',
-        payment_status: 'unpaid',
-        pickup_address: pickupAddress,
-        pickup_lat: pickupPoint.latitude,
-        pickup_lng: pickupPoint.longitude,
-        drop_address: dropAddress,
-        drop_lat: dropPoint.latitude,
-        drop_lng: dropPoint.longitude,
-        estimated_distance_meters: Math.round(distanceKm * 1000),
-        estimated_duration_seconds: Math.round(durationMin * 60),
-        quoted_amount: Number(estimate.toFixed(2)),
-      })
-      .select('id')
-      .single();
-
-    if (bookingError || !bookingRow) {
-      setSubmitting(false);
-      Alert.alert('Booking failed', bookingError?.message || 'Could not create booking.');
-      return;
-    }
-
-    await supabase.from('booking_status_history').insert({
-      booking_id: bookingRow.id,
-      new_status: 'searching_driver',
-      changed_by: user.id,
-      note: 'Customer created booking from mobile app',
-    });
-
-    const { data: dispatchResult, error: dispatchError } = await supabase.rpc('dispatch_booking', {
-      p_booking_id: bookingRow.id,
-    });
-
-    setSubmitting(false);
-
-    if (dispatchError) {
-      Alert.alert(
-        'Booking created',
-        'Your booking was created, but auto-dispatch could not start yet. Admin can still intervene.'
-      );
-    } else if ((dispatchResult?.offered_count ?? 0) === 0) {
-      Alert.alert(
-        'Booking created',
-        'No approved online drivers were available right now. Your booking stays active while the system keeps searching.'
-      );
-    } else {
-      Alert.alert(
-        'Booking created',
-        `Dispatch started and ${dispatchResult.offered_count} driver offer(s) were sent.`
-      );
-    }
-
-    navigation.navigate('TrackingDemo', {
-      bookingId: bookingRow.id,
-      pickupAddress,
-      pickupPoint,
-      dropAddress,
-      dropPoint,
-      distanceKm,
-      durationMin,
-      estimate,
-      vehicle,
-    });
   };
+
+  const walletInsufficient = paymentMethod === 'wallet' && walletPreview.balance < normalizedEstimate;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -143,7 +342,11 @@ export default function BookingSummaryScreen({ navigation, route }: Props) {
         </View>
 
         <View style={styles.mapCard}>
-          <MapView style={styles.map} initialRegion={pointToRegion(pickupPoint, 0.09)} region={pointToRegion(pickupPoint, 0.09)}>
+          <MapView
+            style={styles.map}
+            initialRegion={pointToRegion(pickupPoint, 0.09)}
+            region={pointToRegion(pickupPoint, 0.09)}
+          >
             <Marker coordinate={pickupPoint} title="Pickup" pinColor="#16a34a" />
             <Marker coordinate={dropPoint} title="Dropoff" pinColor="#2563eb" />
             <Polyline coordinates={[pickupPoint, dropPoint]} strokeColor="#2563eb" strokeWidth={4} />
@@ -182,12 +385,127 @@ export default function BookingSummaryScreen({ navigation, route }: Props) {
               </Text>
             </View>
 
-            <Text style={styles.totalPrice}>${estimate.toFixed(2)}</Text>
+            <Text style={styles.totalPrice}>{formatNaira(normalizedEstimate)}</Text>
           </View>
         </View>
 
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Payment</Text>
+
+          <Pressable
+            style={[
+              styles.paymentOptionCard,
+              paymentMethod === 'wallet' && styles.paymentOptionCardActive,
+            ]}
+            onPress={() => setPaymentMethod('wallet')}
+          >
+            <View style={styles.paymentOptionTopRow}>
+              <View>
+                <Text
+                  style={[
+                    styles.paymentOptionTitle,
+                    paymentMethod === 'wallet' && styles.paymentOptionTitleActive,
+                  ]}
+                >
+                  Wallet
+                </Text>
+                <Text style={styles.paymentOptionSubtitle}>Use saved wallet balance</Text>
+              </View>
+
+              <Ionicons
+                name={paymentMethod === 'wallet' ? 'radio-button-on' : 'radio-button-off'}
+                size={20}
+                color={paymentMethod === 'wallet' ? '#16a34a' : '#94a3b8'}
+              />
+            </View>
+
+            <View style={styles.paymentMetaPill}>
+              <Text style={styles.paymentMetaPillText}>
+                Balance: {formatNaira(walletPreview.balance)}
+              </Text>
+            </View>
+          </Pressable>
+
+          <Pressable
+            style={[
+              styles.paymentOptionCard,
+              paymentMethod === 'paystack' && styles.paymentOptionCardActive,
+            ]}
+            onPress={() => setPaymentMethod('paystack')}
+          >
+            <View style={styles.paymentOptionTopRow}>
+              <View>
+                <Text
+                  style={[
+                    styles.paymentOptionTitle,
+                    paymentMethod === 'paystack' && styles.paymentOptionTitleActive,
+                  ]}
+                >
+                  Paystack
+                </Text>
+                <Text style={styles.paymentOptionSubtitle}>
+                  Pay directly with card, bank, or transfer
+                </Text>
+              </View>
+
+              <Ionicons
+                name={paymentMethod === 'paystack' ? 'radio-button-on' : 'radio-button-off'}
+                size={20}
+                color={paymentMethod === 'paystack' ? '#16a34a' : '#94a3b8'}
+              />
+            </View>
+          </Pressable>
+
+          <Pressable
+            style={[
+              styles.paymentOptionCard,
+              paymentMethod === 'cash' && styles.paymentOptionCardActive,
+            ]}
+            onPress={() => setPaymentMethod('cash')}
+          >
+            <View style={styles.paymentOptionTopRow}>
+              <View>
+                <Text
+                  style={[
+                    styles.paymentOptionTitle,
+                    paymentMethod === 'cash' && styles.paymentOptionTitleActive,
+                  ]}
+                >
+                  Cash
+                </Text>
+                <Text style={styles.paymentOptionSubtitle}>Pay after towing service</Text>
+              </View>
+
+              <Ionicons
+                name={paymentMethod === 'cash' ? 'radio-button-on' : 'radio-button-off'}
+                size={20}
+                color={paymentMethod === 'cash' ? '#16a34a' : '#94a3b8'}
+              />
+            </View>
+          </Pressable>
+
+          {walletInsufficient ? (
+            <View style={styles.paymentWarningCard}>
+              <Ionicons name="alert-circle-outline" size={16} color="#b45309" />
+              <Text style={styles.paymentWarningText}>
+                Wallet balance is lower than this trip estimate. Top up your wallet or switch to Paystack or cash.
+              </Text>
+            </View>
+          ) : null}
+        </View>
+
         <Pressable style={styles.primaryButton} onPress={handleRequest} disabled={submitting}>
-          {submitting ? <ActivityIndicator color="#ffffff" /> : <Text style={styles.primaryButtonText}>Request tow</Text>}
+          {submitting ? (
+            <ActivityIndicator color="#ffffff" />
+          ) : (
+            <Text style={styles.primaryButtonText}>
+              {paymentMethod === 'wallet'
+                ? 'Pay & request tow'
+                : paymentMethod === 'paystack'
+                ? 'Continue to Paystack'
+                : 'Request tow'}
+            </Text>
+          )}
         </Pressable>
       </ScrollView>
     </SafeAreaView>
@@ -197,6 +515,7 @@ export default function BookingSummaryScreen({ navigation, route }: Props) {
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#f8fafc' },
   container: { padding: 18, paddingBottom: 30 },
+
   headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -212,7 +531,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     ...shadowCard,
   },
-  headerTitle: { color: '#0f172a', fontSize: 18, fontWeight: '800' },
+  headerTitle: {
+    color: '#0f172a',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+
   mapCard: {
     backgroundColor: '#ffffff',
     borderRadius: 24,
@@ -234,7 +558,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 10,
   },
-  arrivalPillText: { color: '#ffffff', fontWeight: '800', fontSize: 13 },
+  arrivalPillText: {
+    color: '#ffffff',
+    fontWeight: '800',
+    fontSize: 13,
+  },
+
   card: {
     backgroundColor: '#ffffff',
     borderRadius: 24,
@@ -242,10 +571,27 @@ const styles = StyleSheet.create({
     marginBottom: 14,
     ...shadowCard,
   },
-  cardTitle: { color: '#0f172a', fontSize: 18, fontWeight: '800', marginBottom: 12 },
-  routeLine: { color: '#0f172a', fontSize: 15, fontWeight: '700', lineHeight: 21 },
-  routeArrow: { color: '#94a3b8', fontSize: 16, marginVertical: 8 },
-  pillsRow: { flexDirection: 'row', marginTop: 14 },
+  cardTitle: {
+    color: '#0f172a',
+    fontSize: 18,
+    fontWeight: '800',
+    marginBottom: 12,
+  },
+  routeLine: {
+    color: '#0f172a',
+    fontSize: 15,
+    fontWeight: '700',
+    lineHeight: 21,
+  },
+  routeArrow: {
+    color: '#94a3b8',
+    fontSize: 16,
+    marginVertical: 8,
+  },
+  pillsRow: {
+    flexDirection: 'row',
+    marginTop: 14,
+  },
   pill: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -255,11 +601,96 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     marginRight: 10,
   },
-  pillText: { color: '#334155', fontSize: 12, fontWeight: '800', marginLeft: 6 },
-  priceRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  vehicleTitle: { color: '#0f172a', fontSize: 17, fontWeight: '800', marginBottom: 4 },
-  vehicleSubtitle: { color: '#64748b', fontSize: 13, fontWeight: '600' },
-  totalPrice: { color: '#166534', fontSize: 24, fontWeight: '800' },
+  pillText: {
+    color: '#334155',
+    fontSize: 12,
+    fontWeight: '800',
+    marginLeft: 6,
+  },
+
+  priceRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  vehicleTitle: {
+    color: '#0f172a',
+    fontSize: 17,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  vehicleSubtitle: {
+    color: '#64748b',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  totalPrice: {
+    color: '#166534',
+    fontSize: 24,
+    fontWeight: '800',
+  },
+
+  paymentOptionCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  paymentOptionCardActive: {
+    backgroundColor: '#f0fdf4',
+    borderColor: '#86efac',
+  },
+  paymentOptionTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  paymentOptionTitle: {
+    color: '#0f172a',
+    fontSize: 15,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  paymentOptionTitleActive: {
+    color: '#166534',
+  },
+  paymentOptionSubtitle: {
+    color: '#64748b',
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '600',
+  },
+  paymentMetaPill: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#eff6ff',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginTop: 12,
+  },
+  paymentMetaPillText: {
+    color: '#1d4ed8',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  paymentWarningCard: {
+    backgroundColor: '#fef3c7',
+    borderRadius: 16,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  paymentWarningText: {
+    color: '#92400e',
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 18,
+    marginLeft: 8,
+    flex: 1,
+  },
+
   primaryButton: {
     backgroundColor: '#16a34a',
     borderRadius: 18,
@@ -267,5 +698,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     ...shadowCard,
   },
-  primaryButtonText: { color: '#ffffff', fontSize: 15, fontWeight: '800' },
+  primaryButtonText: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '800',
+  },
 });

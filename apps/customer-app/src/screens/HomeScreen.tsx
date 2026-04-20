@@ -2,6 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  AppState,
+  Image,
+  Linking,
   Pressable,
   StyleSheet,
   Text,
@@ -21,10 +24,7 @@ import {
   createNearbyTowUnits,
   estimateDurationMinutes,
   fallbackSuggestions,
-  formatMoney,
-  interpolatePoint,
   MapPoint,
-  nearestTowUnit,
   pointToRegion,
   TowUnit,
   DEFAULT_POINT,
@@ -40,6 +40,10 @@ import {
   reverseGeocodePoint,
 } from '../lib/googleMaps';
 
+/* =========================================================
+   TYPES
+========================================================= */
+
 type VehicleType = {
   id: string;
   name: string;
@@ -53,6 +57,25 @@ type VehicleType = {
 type Profile = {
   full_name: string | null;
   email: string | null;
+  avatar_url: string | null;
+};
+
+type ActiveBooking = {
+  id: string;
+  booking_status: string | null;
+  payment_status: string | null;
+  payment_method: string | null;
+  driver_id: string | null;
+  driver_name: string | null;
+  driver_phone: string | null;
+  pickup_address: string | null;
+  pickup_lat: number | null;
+  pickup_lng: number | null;
+  drop_address: string | null;
+  drop_lat: number | null;
+  drop_lng: number | null;
+  quoted_amount: number | null;
+  created_at: string | null;
 };
 
 type Props = {
@@ -62,7 +85,25 @@ type Props = {
 type Stage = 'idle' | 'search' | 'quote' | 'tracking';
 type ActiveField = 'pickup' | 'drop';
 type PinTarget = 'pickup' | 'drop' | null;
-type TrackingPhase = 'toPickup' | 'toDrop' | 'done';
+type PaymentMethod = 'wallet' | 'cash' | 'paystack';
+
+type WalletPreview = {
+  balance: number;
+  currency: string;
+  ready: boolean;
+};
+
+/* =========================================================
+   CONSTANTS
+========================================================= */
+
+const ACTIVE_BOOKING_STATUSES = [
+  'searching_driver',
+  'driver_assigned',
+  'driver_en_route',
+  'driver_arrived',
+  'in_service',
+];
 
 const shadowCard = {
   shadowColor: '#020617',
@@ -72,6 +113,10 @@ const shadowCard = {
   elevation: 4,
 };
 
+/* =========================================================
+   HELPERS
+========================================================= */
+
 function quoteFor(vehicle: VehicleType, route: RouteResult | null) {
   if (!route) return Number(vehicle.base_fare);
   return (
@@ -80,6 +125,113 @@ function quoteFor(vehicle: VehicleType, route: RouteResult | null) {
     Number(vehicle.per_min_rate) * route.durationMin
   );
 }
+
+function initialsFromName(name?: string | null, fallback = 'C') {
+  const safe = (name || '').trim();
+  if (!safe) return fallback;
+
+  const parts = safe.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase();
+}
+
+function titleize(value?: string | null) {
+  if (!value) return 'Unknown';
+  return value.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function formatNaira(value?: number | null) {
+  return `₦${Number(value || 0).toFixed(2)}`;
+}
+
+function trackingTitle(status?: string | null) {
+  switch (status) {
+    case 'searching_driver':
+      return 'Finding a tow truck';
+    case 'driver_assigned':
+    case 'driver_en_route':
+      return 'Driver is on the way';
+    case 'driver_arrived':
+      return 'Driver has arrived';
+    case 'in_service':
+      return 'Trip in progress';
+    case 'completed':
+      return 'Trip completed';
+    default:
+      return 'Track your booking';
+  }
+}
+
+function trackingSubtitle(status?: string | null) {
+  switch (status) {
+    case 'searching_driver':
+      return 'We are matching your request with the nearest available driver.';
+    case 'driver_assigned':
+    case 'driver_en_route':
+      return 'Your tow driver has been assigned and is heading to your pickup point.';
+    case 'driver_arrived':
+      return 'Your driver has arrived at the pickup point.';
+    case 'in_service':
+      return 'Your vehicle is currently being transported to the destination.';
+    case 'completed':
+      return 'Your towing request has been completed successfully.';
+    default:
+      return 'Your booking details will appear here.';
+  }
+}
+
+function canCallDriver(status?: string | null, phone?: string | null) {
+  if (!phone) return false;
+  if (!status) return false;
+
+  return ![
+    'searching_driver',
+    'completed',
+    'canceled_by_customer',
+    'canceled_by_driver',
+    'canceled_by_admin',
+  ].includes(status);
+}
+
+function bookingLine(
+  booking: ActiveBooking | null,
+  liveDriverPoint: MapPoint | null,
+  routePolyline: MapPoint[]
+) {
+  if (booking) {
+    const pickup =
+      booking.pickup_lat != null && booking.pickup_lng != null
+        ? { latitude: Number(booking.pickup_lat), longitude: Number(booking.pickup_lng) }
+        : null;
+
+    const drop =
+      booking.drop_lat != null && booking.drop_lng != null
+        ? { latitude: Number(booking.drop_lat), longitude: Number(booking.drop_lng) }
+        : null;
+
+    if (
+      ['driver_assigned', 'driver_en_route'].includes(booking.booking_status || '') &&
+      liveDriverPoint &&
+      pickup
+    ) {
+      return [liveDriverPoint, pickup];
+    }
+
+    if (booking.booking_status === 'in_service' && liveDriverPoint && drop) {
+      return [liveDriverPoint, drop];
+    }
+
+    if (pickup && drop) {
+      return [pickup, drop];
+    }
+  }
+
+  return routePolyline;
+}
+
+/* =========================================================
+   SCREEN
+========================================================= */
 
 export default function HomeScreen({ navigation }: Props) {
   const mapRef = useRef<MapView>(null);
@@ -93,11 +245,16 @@ export default function HomeScreen({ navigation }: Props) {
     []
   );
 
+  /* =======================================================
+     STATE
+  ======================================================= */
+
   const [sheetIndex, setSheetIndex] = useState(0);
   const [loading, setLoading] = useState(true);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [vehicleTypes, setVehicleTypes] = useState<VehicleType[]>([]);
   const [stage, setStage] = useState<Stage>('idle');
+  const [userId, setUserId] = useState('');
 
   const [currentPoint, setCurrentPoint] = useState<MapPoint>(DEFAULT_POINT);
   const [currentAddress, setCurrentAddress] = useState('Lagos live dispatch area');
@@ -120,11 +277,21 @@ export default function HomeScreen({ navigation }: Props) {
   const [routeLoading, setRouteLoading] = useState(false);
   const [selectedVehicleId, setSelectedVehicleId] = useState<string | null>(null);
 
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('wallet');
+  const [walletPreview, setWalletPreview] = useState<WalletPreview>({
+    balance: 0,
+    currency: 'NGN',
+    ready: false,
+  });
+
   const [creatingBooking, setCreatingBooking] = useState(false);
-  const [trackingPhase, setTrackingPhase] = useState<TrackingPhase>('toPickup');
-  const [trackingProgress, setTrackingProgress] = useState(0);
   const [trackingBookingId, setTrackingBookingId] = useState<string | null>(null);
-  const [assignedTowStart, setAssignedTowStart] = useState<MapPoint | null>(null);
+  const [activeBooking, setActiveBooking] = useState<ActiveBooking | null>(null);
+  const [liveDriverPoint, setLiveDriverPoint] = useState<MapPoint | null>(null);
+
+  /* =======================================================
+     MEMOS
+  ======================================================= */
 
   const displayName = useMemo(() => {
     if (profile?.full_name?.trim()) return profile.full_name.split(' ')[0];
@@ -132,98 +299,253 @@ export default function HomeScreen({ navigation }: Props) {
     return 'there';
   }, [profile]);
 
+  const displayInitials = useMemo(() => {
+    return initialsFromName(profile?.full_name || profile?.email, 'C');
+  }, [profile]);
+
   const selectedVehicle = useMemo(
     () => vehicleTypes.find((item) => item.id === selectedVehicleId) ?? null,
     [vehicleTypes, selectedVehicleId]
   );
 
-  const trackingDriverPoint = useMemo(() => {
-    if (!assignedTowStart || !pickupPoint || !dropPoint) return null;
-
-    if (trackingPhase === 'toPickup') {
-      return interpolatePoint(assignedTowStart, pickupPoint, trackingProgress);
+  const resolvedPickupPoint = useMemo(() => {
+    if (activeBooking?.pickup_lat != null && activeBooking?.pickup_lng != null) {
+      return {
+        latitude: Number(activeBooking.pickup_lat),
+        longitude: Number(activeBooking.pickup_lng),
+      };
     }
+    return pickupPoint;
+  }, [activeBooking, pickupPoint]);
 
-    if (trackingPhase === 'toDrop') {
-      return interpolatePoint(pickupPoint, dropPoint, trackingProgress);
+  const resolvedDropPoint = useMemo(() => {
+    if (activeBooking?.drop_lat != null && activeBooking?.drop_lng != null) {
+      return {
+        latitude: Number(activeBooking.drop_lat),
+        longitude: Number(activeBooking.drop_lng),
+      };
     }
-
     return dropPoint;
-  }, [assignedTowStart, pickupPoint, dropPoint, trackingPhase, trackingProgress]);
+  }, [activeBooking, dropPoint]);
 
   const activeRoutePolyline = useMemo(() => {
-    if (stage === 'tracking' && trackingDriverPoint && pickupPoint && dropPoint) {
-      if (trackingPhase === 'toPickup') return [trackingDriverPoint, pickupPoint];
-      if (trackingPhase === 'toDrop') return [trackingDriverPoint, dropPoint];
-      return [pickupPoint, dropPoint];
-    }
+    return bookingLine(activeBooking, liveDriverPoint, routeData?.polyline ?? []);
+  }, [activeBooking, liveDriverPoint, routeData]);
 
-    if (routeData?.polyline?.length) return routeData.polyline;
-    return [];
-  }, [stage, trackingDriverPoint, pickupPoint, dropPoint, trackingPhase, routeData]);
+  const mapRegion: Region = useMemo(() => {
+    if (pinTarget) return pointToRegion(pinCandidate, 0.02);
+    if (liveDriverPoint) return pointToRegion(liveDriverPoint, 0.04);
+    if (resolvedPickupPoint) return pointToRegion(resolvedPickupPoint, 0.06);
+    return pointToRegion(currentPoint, 0.08);
+  }, [pinTarget, pinCandidate, liveDriverPoint, resolvedPickupPoint, currentPoint]);
+
+  /* =======================================================
+     DATA LOADERS
+  ======================================================= */
+
+  const loadWalletPreview = useCallback(async (customerId: string) => {
+  const walletRes = await supabase
+    .from('customer_wallets')
+    .select('balance, currency')
+    .eq('customer_id', customerId)
+    .maybeSingle();
+
+  if (!walletRes.error && walletRes.data) {
+    setWalletPreview({
+      balance: Number(walletRes.data.balance ?? 0),
+      currency: walletRes.data.currency ?? 'NGN',
+      ready: true,
+    });
+  } else {
+    setWalletPreview({
+      balance: 0,
+      currency: 'NGN',
+      ready: false,
+    });
+  }
+}, []);
+
+  const loadBookingDetails = useCallback(
+    async (customerId: string, explicitBookingId?: string | null) => {
+      let bookingRow: any = null;
+
+      if (explicitBookingId) {
+        const { data, error } = await supabase
+          .from('bookings')
+          .select(
+            'id, booking_status, payment_status, payment_method, driver_id, pickup_address, pickup_lat, pickup_lng, drop_address, drop_lat, drop_lng, quoted_amount, created_at'
+          )
+          .eq('customer_id', customerId)
+          .eq('id', explicitBookingId)
+          .maybeSingle();
+
+        if (error) throw error;
+        bookingRow = data;
+      } else {
+        const { data, error } = await supabase
+          .from('bookings')
+          .select(
+            'id, booking_status, payment_status, payment_method, driver_id, pickup_address, pickup_lat, pickup_lng, drop_address, drop_lat, drop_lng, quoted_amount, created_at'
+          )
+          .eq('customer_id', customerId)
+          .in('booking_status', ACTIVE_BOOKING_STATUSES)
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (error) throw error;
+        bookingRow = data?.[0] ?? null;
+      }
+
+      if (!bookingRow) {
+        if (!explicitBookingId) {
+          setActiveBooking(null);
+          setLiveDriverPoint(null);
+        }
+        return null;
+      }
+
+      let driverName: string | null = null;
+      let driverPhone: string | null = null;
+
+      if (bookingRow.driver_id) {
+        const { data: driverProfile, error: driverProfileError } = await supabase
+          .from('profiles')
+          .select('full_name, phone')
+          .eq('id', bookingRow.driver_id)
+          .maybeSingle();
+
+        if (!driverProfileError && driverProfile) {
+          driverName = driverProfile.full_name ?? null;
+          driverPhone = driverProfile.phone ?? null;
+        }
+
+        const { data: locationRows, error: driverLocationError } = await supabase
+          .from('driver_locations')
+          .select('latitude, longitude, updated_at')
+          .eq('driver_id', bookingRow.driver_id)
+          .eq('booking_id', bookingRow.id)
+          .order('updated_at', { ascending: false })
+          .limit(1);
+
+        if (!driverLocationError && locationRows?.length) {
+          const latest = locationRows[0];
+          setLiveDriverPoint({
+            latitude: Number(latest.latitude),
+            longitude: Number(latest.longitude),
+          });
+        } else {
+          setLiveDriverPoint(null);
+        }
+      } else {
+        setLiveDriverPoint(null);
+      }
+
+      const nextBooking: ActiveBooking = {
+        id: bookingRow.id,
+        booking_status: bookingRow.booking_status ?? null,
+        payment_status: bookingRow.payment_status ?? null,
+        payment_method: bookingRow.payment_method ?? null,
+        driver_id: bookingRow.driver_id ?? null,
+        driver_name: driverName,
+        driver_phone: driverPhone,
+        pickup_address: bookingRow.pickup_address ?? null,
+        pickup_lat: bookingRow.pickup_lat ?? null,
+        pickup_lng: bookingRow.pickup_lng ?? null,
+        drop_address: bookingRow.drop_address ?? null,
+        drop_lat: bookingRow.drop_lat ?? null,
+        drop_lng: bookingRow.drop_lng ?? null,
+        quoted_amount: bookingRow.quoted_amount ?? null,
+        created_at: bookingRow.created_at ?? null,
+      };
+
+      setActiveBooking(nextBooking);
+      setTrackingBookingId(bookingRow.id);
+      return nextBooking;
+    },
+    []
+  );
+
+  const loadBootstrap = useCallback(async () => {
+    setLoading(true);
+
+    try {
+      const userResult = await supabase.auth.getUser();
+      const user = userResult.data.user;
+
+      if (user) {
+        setUserId(user.id);
+        await loadWalletPreview(user.id);
+
+        const [{ data: profileRow }, { data: vehicleRows }] = await Promise.all([
+          supabase
+            .from('profiles')
+            .select('full_name, email, avatar_url')
+            .eq('id', user.id)
+            .single(),
+          supabase
+            .from('vehicle_types')
+            .select('id, name, tonnage_min, tonnage_max, base_fare, per_km_rate, per_min_rate')
+            .eq('is_active', true)
+            .order('display_order', { ascending: true }),
+        ]);
+
+        setProfile(
+          profileRow ?? {
+            full_name: user.user_metadata?.full_name ?? null,
+            email: user.email ?? null,
+            avatar_url: null,
+          }
+        );
+        setVehicleTypes((vehicleRows ?? []) as VehicleType[]);
+
+        const existingBooking = await loadBookingDetails(user.id);
+        if (existingBooking) {
+          setStage('tracking');
+        }
+      }
+
+      const permission = await Location.getForegroundPermissionsAsync();
+      const granted = permission.status === 'granted';
+      setHasLocationPermission(granted);
+
+      if (granted) {
+        const position = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.Balanced,
+        });
+
+        const point = {
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+        };
+
+        setCurrentPoint(point);
+        setTowUnits(createNearbyTowUnits(point));
+
+        const reverseLabel = await reverseGeocodePoint(point);
+        setCurrentAddress(reverseLabel);
+      } else {
+        setCurrentPoint(DEFAULT_POINT);
+        setCurrentAddress('Lagos live dispatch area');
+        setTowUnits(createNearbyTowUnits(DEFAULT_POINT));
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [loadBookingDetails, loadWalletPreview]);
+
+  /* =======================================================
+     EFFECTS
+  ======================================================= */
+
+  useEffect(() => {
+    void loadBootstrap();
+  }, [loadBootstrap]);
 
   useEffect(() => {
     if (!selectedVehicleId && vehicleTypes.length > 0) {
       setSelectedVehicleId(vehicleTypes[0].id);
     }
   }, [vehicleTypes, selectedVehicleId]);
-
-  const loadBootstrap = async () => {
-    setLoading(true);
-
-    const userResult = await supabase.auth.getUser();
-    const user = userResult.data.user;
-
-    if (user) {
-      const [{ data: profileRow }, { data: vehicleRows }] = await Promise.all([
-        supabase.from('profiles').select('full_name, email').eq('id', user.id).single(),
-        supabase
-          .from('vehicle_types')
-          .select('id, name, tonnage_min, tonnage_max, base_fare, per_km_rate, per_min_rate')
-          .eq('is_active', true)
-          .order('display_order', { ascending: true }),
-      ]);
-
-      setProfile(
-        profileRow ?? {
-          full_name: user.user_metadata?.full_name ?? null,
-          email: user.email ?? null,
-        }
-      );
-      setVehicleTypes((vehicleRows ?? []) as VehicleType[]);
-    }
-
-    const permission = await Location.getForegroundPermissionsAsync();
-    const granted = permission.status === 'granted';
-    setHasLocationPermission(granted);
-
-    if (granted) {
-      const position = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      });
-
-      const point = {
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
-      };
-
-      setCurrentPoint(point);
-      setTowUnits(createNearbyTowUnits(point));
-
-      const reverseLabel = await reverseGeocodePoint(point);
-      setCurrentAddress(reverseLabel);
-    } else {
-      setCurrentPoint(DEFAULT_POINT);
-      setCurrentAddress('Lagos live dispatch area');
-      setTowUnits(createNearbyTowUnits(DEFAULT_POINT));
-    }
-
-    setLoading(false);
-  };
-
-  useEffect(() => {
-    loadBootstrap();
-  }, []);
 
   useEffect(() => {
     if (stage !== 'search') return;
@@ -241,30 +563,40 @@ export default function HomeScreen({ navigation }: Props) {
   }, [stage, activeField, pickupText, dropText, placesSessionToken, currentPoint]);
 
   useEffect(() => {
-    if (stage !== 'tracking' || !assignedTowStart || !pickupPoint || !dropPoint) return;
+    if (!userId || !trackingBookingId) return;
 
     const interval = setInterval(() => {
-      setTrackingProgress((prev) => {
-        if (prev >= 1) {
-          if (trackingPhase === 'toPickup') {
-            setTrackingPhase('toDrop');
-            return 0;
-          }
-
-          if (trackingPhase === 'toDrop') {
-            setTrackingPhase('done');
-            return 1;
-          }
-
-          return 1;
-        }
-
-        return Math.min(1, prev + 0.14);
+      loadBookingDetails(userId, trackingBookingId).catch((error) => {
+        console.log(
+          '[customer-booking-poll]',
+          error instanceof Error ? error.message : String(error)
+        );
       });
-    }, 1200);
+    }, 6000);
 
     return () => clearInterval(interval);
-  }, [stage, trackingPhase, assignedTowStart, pickupPoint, dropPoint]);
+  }, [userId, trackingBookingId, loadBookingDetails]);
+
+  useEffect(() => {
+    if (pickupPoint && dropPoint) {
+      void buildRoute();
+    }
+  }, [pickupPoint, dropPoint]);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && userId) {
+        void loadWalletPreview(userId);
+        void loadBookingDetails(userId, trackingBookingId);
+      }
+    });
+
+    return () => sub.remove();
+  }, [userId, trackingBookingId, loadWalletPreview, loadBookingDetails]);
+
+  /* =======================================================
+     ACTIONS
+  ======================================================= */
 
   const askForCurrentLocation = async () => {
     const permission = await Location.requestForegroundPermissionsAsync();
@@ -302,6 +634,25 @@ export default function HomeScreen({ navigation }: Props) {
   };
 
   const openSearch = () => {
+    if (activeBooking && ACTIVE_BOOKING_STATUSES.includes(activeBooking.booking_status || '')) {
+      Alert.alert(
+        'Booking in progress',
+        'You already have an active towing request. Please finish it before creating another one.'
+      );
+      return;
+    }
+
+    setStage('search');
+    sheetRef.current?.snapToIndex(2);
+  };
+
+  const goBackToIdle = () => {
+    setPinTarget(null);
+    setStage('idle');
+    sheetRef.current?.snapToIndex(0);
+  };
+
+  const backToSearch = () => {
     setStage('search');
     sheetRef.current?.snapToIndex(2);
   };
@@ -383,6 +734,11 @@ export default function HomeScreen({ navigation }: Props) {
     if (!pickupPoint || !dropPoint) return;
 
     setRouteLoading(true);
+
+    if (userId) {
+      await loadWalletPreview(userId);
+    }
+
     const route = await computeDrivingRoute(pickupPoint, dropPoint);
     setRouteData(route);
     setRouteLoading(false);
@@ -397,27 +753,42 @@ export default function HomeScreen({ navigation }: Props) {
     }
   };
 
-  useEffect(() => {
-    if (pickupPoint && dropPoint) {
-      buildRoute();
-    }
-  }, [pickupPoint, dropPoint]);
+ const handleCreateBooking = async () => {
+  if (!pickupPoint || !dropPoint || !selectedVehicle || !routeData) return;
 
-  const handleCreateBooking = async () => {
-    if (!pickupPoint || !dropPoint || !selectedVehicle || !routeData) return;
+  setCreatingBooking(true);
 
-    setCreatingBooking(true);
-
+  try {
     const userResult = await supabase.auth.getUser();
     const user = userResult.data.user;
 
     if (!user) {
-      setCreatingBooking(false);
       Alert.alert('Session expired', 'Please sign in again.');
       return;
     }
 
-    const estimate = quoteFor(selectedVehicle, routeData);
+    const estimate = Number(quoteFor(selectedVehicle, routeData).toFixed(2));
+
+    if (paymentMethod === 'wallet') {
+      const walletRes = await supabase
+        .from('customer_wallets')
+        .select('balance')
+        .eq('customer_id', user.id)
+        .maybeSingle();
+
+      const balance = Number(walletRes.data?.balance ?? 0);
+
+      if (balance < estimate) {
+        Alert.alert(
+          'Insufficient wallet balance',
+          `Your wallet balance is ${formatNaira(balance)}`
+        );
+        return;
+      }
+    }
+
+    const initialPaymentStatus =
+      paymentMethod === 'paystack' ? 'pending' : 'unpaid';
 
     const { data: bookingRow, error } = await supabase
       .from('bookings')
@@ -425,7 +796,8 @@ export default function HomeScreen({ navigation }: Props) {
         customer_id: user.id,
         vehicle_type_id: selectedVehicle.id,
         booking_status: 'searching_driver',
-        payment_status: 'unpaid',
+        payment_status: initialPaymentStatus,
+        payment_method: paymentMethod,
         pickup_address: pickupText,
         pickup_lat: pickupPoint.latitude,
         pickup_lng: pickupPoint.longitude,
@@ -434,40 +806,146 @@ export default function HomeScreen({ navigation }: Props) {
         drop_lng: dropPoint.longitude,
         estimated_distance_meters: Math.round(routeData.distanceKm * 1000),
         estimated_duration_seconds: Math.round(routeData.durationMin * 60),
-        quoted_amount: Number(estimate.toFixed(2)),
+        quoted_amount: estimate,
       })
       .select('id')
       .single();
 
     if (error || !bookingRow) {
-      setCreatingBooking(false);
-      Alert.alert('Booking failed', error?.message || 'Could not create booking.');
+      Alert.alert('Booking failed', error?.message || 'Error creating booking');
       return;
+    }
+
+    if (paymentMethod === 'wallet') {
+      const { data, error: walletError } = await supabase.rpc(
+        'pay_customer_booking_with_wallet',
+        {
+          p_booking_id: bookingRow.id,
+          p_customer_id: user.id,
+        }
+      );
+
+      if (walletError || !data?.success) {
+        await supabase
+          .from('bookings')
+          .delete()
+          .eq('id', bookingRow.id)
+          .eq('customer_id', user.id);
+
+        Alert.alert(
+          'Wallet payment failed',
+          walletError?.message || data?.message || 'Could not complete wallet payment.'
+        );
+        return;
+      }
+
+      await loadWalletPreview(user.id);
     }
 
     await supabase.from('booking_status_history').insert({
       booking_id: bookingRow.id,
       new_status: 'searching_driver',
       changed_by: user.id,
-      note: 'Customer created booking from map-first mobile flow',
+      note: `Customer created booking. Payment method: ${paymentMethod}.`,
     });
 
-    const assigned = nearestTowUnit(pickupPoint, towUnits);
-
     setTrackingBookingId(bookingRow.id);
-    setAssignedTowStart(assigned.point);
-    setTrackingPhase('toPickup');
-    setTrackingProgress(0);
+    await loadBookingDetails(user.id, bookingRow.id);
+
     setStage('tracking');
-    setCreatingBooking(false);
     sheetRef.current?.snapToIndex(1);
-  };
+
+    if (paymentMethod === 'paystack') {
+      const { data, error: paystackError } = await supabase.functions.invoke(
+        'paystack-initialize-booking-payment',
+        {
+          body: {
+            booking_id: bookingRow.id,
+            email: user.email,
+            amount: estimate,
+          },
+        }
+      );
+
+      if (paystackError || !data?.data?.authorization_url) {
+        Alert.alert(
+          'Payment init failed',
+          paystackError?.message ||
+            data?.error ||
+            'Could not start Paystack payment.'
+        );
+        return;
+      }
+
+      Alert.alert(
+        'Continue payment',
+        'You will now be redirected to Paystack to complete payment.'
+      );
+
+      await Linking.openURL(data.data.authorization_url);
+    }
+  } catch (error) {
+    Alert.alert(
+      'Booking failed',
+      error instanceof Error ? error.message : 'Something went wrong.'
+    );
+  } finally {
+    setCreatingBooking(false);
+  }
+};
 
   const handleSignOut = async () => {
     const { error } = await supabase.auth.signOut();
     if (error) {
       Alert.alert('Sign out failed', error.message);
     }
+  };
+
+  const callDriver = async () => {
+    const phone = activeBooking?.driver_phone;
+
+    if (!phone) {
+      Alert.alert('Driver unavailable', 'A driver phone number is not available yet.');
+      return;
+    }
+
+    const url = `tel:${phone}`;
+
+    try {
+      const supported = await Linking.canOpenURL(url);
+      if (!supported) {
+        Alert.alert('Call failed', 'Your device could not open the phone dialer.');
+        return;
+      }
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert('Call failed', 'Could not start the phone call.');
+    }
+  };
+
+  const closeCompletedBooking = () => {
+    setTrackingBookingId(null);
+    setActiveBooking(null);
+    setLiveDriverPoint(null);
+    setPickupText('');
+    setDropText('');
+    setPickupPoint(null);
+    setDropPoint(null);
+    setRouteData(null);
+    setStage('idle');
+    sheetRef.current?.snapToIndex(0);
+  };
+
+  const renderSheetHeader = (title: string, onBack: () => void) => {
+    return (
+      <View style={styles.sheetHeaderRow}>
+        <Pressable style={styles.sheetBackButton} onPress={onBack}>
+          <Ionicons name="arrow-back" size={16} color="#0f172a" />
+          <Text style={styles.sheetBackText}>Back</Text>
+        </Pressable>
+        <Text style={styles.sheetHeaderSpacer}>{title}</Text>
+      </View>
+    );
   };
 
   const renderSheetContent = () => {
@@ -484,7 +962,7 @@ export default function HomeScreen({ navigation }: Props) {
             </View>
           </Pressable>
 
-          <View style={styles.actionRow}>
+          <View style={styles.actionGrid}>
             <Pressable style={styles.actionCard} onPress={openSearch}>
               <Ionicons name="car-sport-outline" size={20} color="#2563eb" />
               <Text style={styles.actionText}>Book tow</Text>
@@ -495,9 +973,14 @@ export default function HomeScreen({ navigation }: Props) {
               <Text style={styles.actionText}>Rides</Text>
             </Pressable>
 
-            <Pressable style={styles.actionCard} onPress={handleSignOut}>
-              <Ionicons name="log-out-outline" size={20} color="#7c3aed" />
-              <Text style={styles.actionText}>Logout</Text>
+            <Pressable style={styles.actionCard} onPress={() => navigation.navigate('Profile')}>
+              <Ionicons name="person-circle-outline" size={20} color="#7c3aed" />
+              <Text style={styles.actionText}>Profile</Text>
+            </Pressable>
+
+            <Pressable style={styles.actionCard} onPress={() => navigation.navigate('Wallet')}>
+              <Ionicons name="wallet-outline" size={20} color="#16a34a" />
+              <Text style={styles.actionText}>Wallet</Text>
             </Pressable>
           </View>
         </BottomSheetScrollView>
@@ -507,12 +990,19 @@ export default function HomeScreen({ navigation }: Props) {
     if (stage === 'search') {
       return (
         <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
+          {renderSheetHeader('Search', goBackToIdle)}
+
           <Text style={styles.sheetTitle}>Set your route</Text>
           <Text style={styles.sheetSubtitle}>
             Type addresses, use current location, or pin the exact point on the map.
           </Text>
 
-          <View style={[styles.inputCard, activeField === 'pickup' ? styles.inputCardActive : null]}>
+          <View
+            style={[
+              styles.inputCard,
+              activeField === 'pickup' ? styles.inputCardActive : null,
+            ]}
+          >
             <View style={styles.inputMarkerShell}>
               <Ionicons name="locate" size={16} color="#16a34a" />
             </View>
@@ -539,7 +1029,12 @@ export default function HomeScreen({ navigation }: Props) {
 
           <View style={styles.connectorLine} />
 
-          <View style={[styles.inputCard, activeField === 'drop' ? styles.inputCardActive : null]}>
+          <View
+            style={[
+              styles.inputCard,
+              activeField === 'drop' ? styles.inputCardActive : null,
+            ]}
+          >
             <View style={styles.inputMarkerShell}>
               <Ionicons name="flag" size={16} color="#2563eb" />
             </View>
@@ -587,7 +1082,11 @@ export default function HomeScreen({ navigation }: Props) {
             </View>
           ) : (
             suggestions.map((item) => (
-              <Pressable key={item.id} style={styles.suggestionRow} onPress={() => selectSuggestion(item)}>
+              <Pressable
+                key={item.id}
+                style={styles.suggestionRow}
+                onPress={() => selectSuggestion(item)}
+              >
                 <View style={styles.suggestionIconShell}>
                   <Ionicons name="location-outline" size={16} color="#475569" />
                 </View>
@@ -603,8 +1102,15 @@ export default function HomeScreen({ navigation }: Props) {
     }
 
     if (stage === 'quote') {
+      const currentEstimate = Number(
+        quoteFor(selectedVehicle as VehicleType, routeData).toFixed(2)
+      );
+      const walletShort = walletPreview.balance < currentEstimate;
+
       return (
         <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
+          {renderSheetHeader('Confirm route', backToSearch)}
+
           <Text style={styles.sheetTitle}>Confirm your route</Text>
           <Text style={styles.sheetSubtitle}>
             Route, ETA, and tow class are ready. Pick the truck class that fits the vehicle.
@@ -646,7 +1152,12 @@ export default function HomeScreen({ navigation }: Props) {
               >
                 <View style={styles.vehicleTopRow}>
                   <View>
-                    <Text style={[styles.vehicleTitle, active ? styles.vehicleTitleActive : null]}>
+                    <Text
+                      style={[
+                        styles.vehicleTitle,
+                        active ? styles.vehicleTitleActive : null,
+                      ]}
+                    >
                       {vehicle.name}
                     </Text>
                     <Text style={styles.vehicleSubtitle}>
@@ -662,19 +1173,144 @@ export default function HomeScreen({ navigation }: Props) {
                 </View>
 
                 <View style={styles.vehicleQuoteRow}>
-                  <Text style={styles.vehicleEtaLabel}>{Math.max(5, routeData?.durationMin || estimateDurationMinutes(6))} min arrival</Text>
-                  <Text style={styles.vehiclePrice}>{formatMoney(estimate)}</Text>
+                  <Text style={styles.vehicleEtaLabel}>
+                    {Math.max(5, routeData?.durationMin || estimateDurationMinutes(6))} min arrival
+                  </Text>
+                  <Text style={styles.vehiclePrice}>{formatNaira(estimate)}</Text>
                 </View>
               </Pressable>
             );
           })}
 
+          <Text style={styles.sectionHeading}>Payment</Text>
+
+          <View style={styles.paymentWrap}>
+            <Pressable
+              style={[
+                styles.paymentOptionCard,
+                paymentMethod === 'wallet' && styles.paymentOptionCardActive,
+              ]}
+              onPress={() => setPaymentMethod('wallet')}
+            >
+              <View style={styles.paymentOptionTopRow}>
+                <View>
+                  <Text
+                    style={[
+                      styles.paymentOptionTitle,
+                      paymentMethod === 'wallet' && styles.paymentOptionTitleActive,
+                    ]}
+                  >
+                    Wallet
+                  </Text>
+                  <Text style={styles.paymentOptionSubtitle}>
+                    Pay now using your wallet balance
+                  </Text>
+                </View>
+
+                <Ionicons
+                  name={paymentMethod === 'wallet' ? 'radio-button-on' : 'radio-button-off'}
+                  size={20}
+                  color={paymentMethod === 'wallet' ? '#16a34a' : '#94a3b8'}
+                />
+              </View>
+
+              <View style={styles.paymentMetaPill}>
+                <Text style={styles.paymentMetaPillText}>
+                  Balance: {formatNaira(walletPreview.balance)}
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={[
+                styles.paymentOptionCard,
+                paymentMethod === 'paystack' && styles.paymentOptionCardActive,
+              ]}
+              onPress={() => setPaymentMethod('paystack')}
+            >
+              <View style={styles.paymentOptionTopRow}>
+                <View>
+                  <Text
+                    style={[
+                      styles.paymentOptionTitle,
+                      paymentMethod === 'paystack' && styles.paymentOptionTitleActive,
+                    ]}
+                  >
+                    Paystack
+                  </Text>
+                  <Text style={styles.paymentOptionSubtitle}>
+                    Pay securely with card or bank
+                  </Text>
+                </View>
+
+                <Ionicons
+                  name={paymentMethod === 'paystack' ? 'radio-button-on' : 'radio-button-off'}
+                  size={20}
+                  color={paymentMethod === 'paystack' ? '#16a34a' : '#94a3b8'}
+                />
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={[
+                styles.paymentOptionCard,
+                paymentMethod === 'cash' && styles.paymentOptionCardActive,
+              ]}
+              onPress={() => setPaymentMethod('cash')}
+            >
+              <View style={styles.paymentOptionTopRow}>
+                <View>
+                  <Text
+                    style={[
+                      styles.paymentOptionTitle,
+                      paymentMethod === 'cash' && styles.paymentOptionTitleActive,
+                    ]}
+                  >
+                    Cash
+                  </Text>
+                  <Text style={styles.paymentOptionSubtitle}>
+                    Pay after the towing service
+                  </Text>
+                </View>
+
+                <Ionicons
+                  name={paymentMethod === 'cash' ? 'radio-button-on' : 'radio-button-off'}
+                  size={20}
+                  color={paymentMethod === 'cash' ? '#16a34a' : '#94a3b8'}
+                />
+              </View>
+            </Pressable>
+
+            {paymentMethod === 'wallet' && walletShort ? (
+              <View style={styles.paymentWarningCard}>
+                <Ionicons name="alert-circle-outline" size={16} color="#b45309" />
+                <Text style={styles.paymentWarningText}>
+                  Wallet balance is lower than this trip estimate. Top up your wallet or switch to
+                  cash.
+                </Text>
+              </View>
+            ) : null}
+          </View>
+
           <Pressable
-            style={[styles.primaryButton, (!selectedVehicle || creatingBooking) ? styles.primaryButtonDisabled : null]}
+            style={[
+              styles.primaryButton,
+              !selectedVehicle || creatingBooking ? styles.primaryButtonDisabled : null,
+            ]}
             disabled={!selectedVehicle || creatingBooking}
             onPress={handleCreateBooking}
           >
-            {creatingBooking ? <ActivityIndicator color="#ffffff" /> : <Text style={styles.primaryButtonText}>Confirm tow</Text>}
+            {creatingBooking ? (
+              <ActivityIndicator color="#ffffff" />
+            ) : (
+              <Text style={styles.primaryButtonText}>
+                {paymentMethod === 'wallet'
+                  ? 'Pay & request tow'
+                  : paymentMethod === 'paystack'
+                  ? 'Continue to Paystack'
+                  : 'Request tow'}
+              </Text>
+            )}
           </Pressable>
         </BottomSheetScrollView>
       );
@@ -682,61 +1318,88 @@ export default function HomeScreen({ navigation }: Props) {
 
     return (
       <BottomSheetScrollView contentContainerStyle={styles.sheetContent}>
-        <Text style={styles.sheetTitle}>
-          {trackingPhase === 'toPickup'
-            ? trackingProgress >= 1
-              ? 'Tow truck arrived'
-              : 'Tow truck is coming'
-            : trackingPhase === 'toDrop'
-            ? 'Heading to destination'
-            : 'Trip completed'}
-        </Text>
-
-        <Text style={styles.sheetSubtitle}>
-          {trackingPhase === 'toPickup'
-            ? 'Watch the truck move toward your pickup point.'
-            : trackingPhase === 'toDrop'
-            ? 'The truck is moving toward your dropoff point now.'
-            : 'Your demo tracking flow is complete.'}
-        </Text>
+        <Text style={styles.sheetTitle}>{trackingTitle(activeBooking?.booking_status)}</Text>
+        <Text style={styles.sheetSubtitle}>{trackingSubtitle(activeBooking?.booking_status)}</Text>
 
         <View style={styles.trackingCard}>
           <Text style={styles.trackingLabel}>Booking</Text>
-          <Text style={styles.trackingValue}>{trackingBookingId || 'Pending'}</Text>
+          <Text style={styles.trackingValue}>
+            {activeBooking?.id || trackingBookingId || 'Pending'}
+          </Text>
 
           <Text style={[styles.trackingLabel, { marginTop: 14 }]}>Status</Text>
           <Text style={styles.trackingValue}>
-            {trackingPhase === 'toPickup'
-              ? trackingProgress >= 1
-                ? 'Driver arrived'
-                : 'Driver en route'
-              : trackingPhase === 'toDrop'
-              ? 'In service'
-              : 'Completed'}
+            {titleize(activeBooking?.booking_status || 'searching_driver')}
           </Text>
+
+          <Text style={[styles.trackingLabel, { marginTop: 14 }]}>Driver</Text>
+          <Text style={styles.trackingValue}>
+            {activeBooking?.driver_name ||
+              (activeBooking?.driver_id ? 'Assigned driver' : 'Waiting for assignment')}
+          </Text>
+
+          <Text style={[styles.trackingLabel, { marginTop: 14 }]}>Payment method</Text>
+          <Text style={styles.trackingValue}>
+            {titleize(activeBooking?.payment_method || 'cash')}
+          </Text>
+
+          <Text style={[styles.trackingLabel, { marginTop: 14 }]}>Payment status</Text>
+          <Text style={styles.trackingValue}>
+            {titleize(activeBooking?.payment_status || 'unpaid')}
+          </Text>
+
+          {activeBooking?.quoted_amount != null ? (
+            <>
+              <Text style={[styles.trackingLabel, { marginTop: 14 }]}>Estimate</Text>
+              <Text style={styles.trackingValue}>
+                {formatNaira(Number(activeBooking.quoted_amount))}
+              </Text>
+            </>
+          ) : null}
         </View>
 
+        {!activeBooking?.driver_id ? (
+          <View style={styles.statusNoticeCard}>
+            <Ionicons name="time-outline" size={18} color="#b45309" />
+            <Text style={styles.statusNoticeText}>
+              We are still searching for an available tow driver for this request.
+            </Text>
+          </View>
+        ) : null}
+
+        {activeBooking?.driver_phone ? (
+          <View style={styles.driverPhoneCard}>
+            <Text style={styles.driverPhoneLabel}>Driver phone</Text>
+            <Text style={styles.driverPhoneValue}>{activeBooking.driver_phone}</Text>
+          </View>
+        ) : null}
+
         <View style={styles.helperRow}>
-          <Pressable style={styles.helperButton} onPress={() => Alert.alert('Driver contact', 'Call/chat hooks come next.')}>
-            <Ionicons name="call-outline" size={16} color="#16a34a" />
-            <Text style={styles.helperButtonText}>Call driver</Text>
-          </Pressable>
+          {canCallDriver(activeBooking?.booking_status, activeBooking?.driver_phone) ? (
+            <Pressable style={styles.helperButton} onPress={callDriver}>
+              <Ionicons name="call-outline" size={16} color="#16a34a" />
+              <Text style={styles.helperButtonText}>Call driver</Text>
+            </Pressable>
+          ) : null}
 
           <Pressable style={styles.helperButton} onPress={() => navigation.navigate('History')}>
             <Ionicons name="time-outline" size={16} color="#2563eb" />
             <Text style={styles.helperButtonText}>View rides</Text>
           </Pressable>
         </View>
+
+        {activeBooking?.booking_status === 'completed' ? (
+          <Pressable style={styles.primaryButton} onPress={closeCompletedBooking}>
+            <Text style={styles.primaryButtonText}>Back home</Text>
+          </Pressable>
+        ) : null}
       </BottomSheetScrollView>
     );
   };
 
-  const mapRegion: Region = useMemo(() => {
-    if (pinTarget) return pointToRegion(pinCandidate, 0.02);
-    if (trackingDriverPoint) return pointToRegion(trackingDriverPoint, 0.06);
-    if (pickupPoint) return pointToRegion(pickupPoint, 0.06);
-    return pointToRegion(currentPoint, 0.08);
-  }, [pinTarget, pinCandidate, trackingDriverPoint, pickupPoint, currentPoint]);
+  /* =======================================================
+     MAIN RETURN
+  ======================================================= */
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -757,24 +1420,30 @@ export default function HomeScreen({ navigation }: Props) {
           showsUserLocation={hasLocationPermission}
           showsMyLocationButton={false}
         >
-          {stage !== 'tracking' && towUnits.map((unit) => (
-            <Marker
-              key={unit.id}
-              coordinate={unit.point}
-              title={unit.title}
-              description={`${unit.etaMin} min away`}
-            >
-              <View style={styles.truckMarker}>
-                <Ionicons name="car-sport" size={14} color="#ffffff" />
-              </View>
-            </Marker>
-          ))}
+          {stage !== 'tracking' &&
+            towUnits.map((unit) => (
+              <Marker
+                key={unit.id}
+                coordinate={unit.point}
+                title={unit.title}
+                description={`${unit.etaMin} min away`}
+              >
+                <View style={styles.truckMarker}>
+                  <Ionicons name="car-sport" size={14} color="#ffffff" />
+                </View>
+              </Marker>
+            ))}
 
-          {pickupPoint ? <Marker coordinate={pickupPoint} title="Pickup" pinColor="#16a34a" /> : null}
-          {dropPoint ? <Marker coordinate={dropPoint} title="Dropoff" pinColor="#2563eb" /> : null}
+          {resolvedPickupPoint ? (
+            <Marker coordinate={resolvedPickupPoint} title="Pickup" pinColor="#16a34a" />
+          ) : null}
 
-          {stage === 'tracking' && trackingDriverPoint ? (
-            <Marker coordinate={trackingDriverPoint} title="Tow truck">
+          {resolvedDropPoint ? (
+            <Marker coordinate={resolvedDropPoint} title="Dropoff" pinColor="#2563eb" />
+          ) : null}
+
+          {stage === 'tracking' && liveDriverPoint ? (
+            <Marker coordinate={liveDriverPoint} title="Tow truck">
               <View style={styles.driverMarker}>
                 <Ionicons name="car-sport" size={14} color="#ffffff" />
               </View>
@@ -788,13 +1457,27 @@ export default function HomeScreen({ navigation }: Props) {
 
         <View style={styles.topOverlay}>
           <View style={styles.topCard}>
-            <Text style={styles.topEyebrow}>TowSwift</Text>
-            <Text style={styles.topTitle}>Hi, {displayName}</Text>
-            <Text style={styles.topSubtitle}>
-              {pinTarget
-                ? `Move the map and confirm the exact ${pinTarget} point`
-                : 'Swipe the sheet down for more map or up for the full route builder.'}
-            </Text>
+            <View style={styles.topCardRow}>
+              {profile?.avatar_url ? (
+                <Image source={{ uri: profile.avatar_url }} style={styles.topAvatarImage} />
+              ) : (
+                <View style={styles.topAvatarFallback}>
+                  <Text style={styles.topAvatarFallbackText}>{displayInitials}</Text>
+                </View>
+              )}
+
+              <View style={{ flex: 1 }}>
+                <Text style={styles.topEyebrow}>TowSwift</Text>
+                <Text style={styles.topTitle}>Hi, {displayName}</Text>
+                <Text style={styles.topSubtitle}>
+                  {pinTarget
+                    ? `Move the map and confirm the exact ${pinTarget} point`
+                    : activeBooking
+                    ? 'Track your booking, contact the driver, or review your rides.'
+                    : 'Swipe the sheet down for more map or up for the full route builder.'}
+                </Text>
+              </View>
+            </View>
           </View>
 
           <Pressable style={styles.logoutButton} onPress={handleSignOut}>
@@ -802,8 +1485,11 @@ export default function HomeScreen({ navigation }: Props) {
           </Pressable>
         </View>
 
-        {sheetIndex === 0 && !pinTarget ? (
-          <Pressable style={styles.reopenButton} onPress={() => sheetRef.current?.snapToIndex(2)}>
+        {sheetIndex === 0 && !pinTarget && stage !== 'tracking' ? (
+          <Pressable
+            style={styles.reopenButton}
+            onPress={() => sheetRef.current?.snapToIndex(2)}
+          >
             <Ionicons name="search" size={16} color="#ffffff" />
             <Text style={styles.reopenButtonText}>Where to?</Text>
           </Pressable>
@@ -834,7 +1520,7 @@ export default function HomeScreen({ navigation }: Props) {
 
         <BottomSheet
           ref={sheetRef}
-          index={0}
+          index={stage === 'tracking' ? 1 : 0}
           snapPoints={snapPoints}
           onChange={(index) => setSheetIndex(index)}
           backdropComponent={backdropComponent}
@@ -855,9 +1541,14 @@ export default function HomeScreen({ navigation }: Props) {
   );
 }
 
+/* =========================================================
+   STYLES
+========================================================= */
+
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#06111F' },
   root: { flex: 1 },
+
   topOverlay: {
     position: 'absolute',
     top: 16,
@@ -875,6 +1566,31 @@ const styles = StyleSheet.create({
     marginRight: 10,
     ...shadowCard,
   },
+  topCardRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  topAvatarImage: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#e2e8f0',
+    marginRight: 12,
+  },
+  topAvatarFallback: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#2563eb',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  topAvatarFallbackText: {
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: '800',
+  },
   topEyebrow: {
     color: '#2563eb',
     fontSize: 12,
@@ -885,7 +1601,7 @@ const styles = StyleSheet.create({
   },
   topTitle: {
     color: '#0f172a',
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: '800',
     marginBottom: 4,
   },
@@ -904,6 +1620,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     ...shadowCard,
   },
+
   reopenButton: {
     position: 'absolute',
     bottom: 122,
@@ -922,6 +1639,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     marginLeft: 8,
   },
+
   truckMarker: {
     width: 30,
     height: 30,
@@ -942,6 +1660,7 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#ffffff',
   },
+
   centerPinWrap: {
     position: 'absolute',
     top: '47%',
@@ -959,6 +1678,7 @@ const styles = StyleSheet.create({
     borderWidth: 3,
     borderColor: '#ffffff',
   },
+
   pinConfirmCard: {
     position: 'absolute',
     left: 16,
@@ -976,6 +1696,7 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     textAlign: 'center',
   },
+
   handleIndicator: {
     backgroundColor: '#cbd5e1',
     width: 44,
@@ -989,6 +1710,31 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingBottom: 34,
   },
+
+  sheetHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  sheetBackButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  sheetBackText: {
+    color: '#0f172a',
+    fontSize: 12,
+    fontWeight: '800',
+    marginLeft: 6,
+  },
+  sheetHeaderSpacer: {
+    color: 'transparent',
+    marginLeft: 8,
+  },
+
   whereCard: {
     backgroundColor: '#f8fafc',
     borderRadius: 22,
@@ -1019,19 +1765,22 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
   },
-  actionRow: {
+
+  actionGrid: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     justifyContent: 'space-between',
     marginBottom: 18,
   },
   actionCard: {
-    width: '31.5%',
+    width: '48%',
     backgroundColor: '#ffffff',
     borderRadius: 20,
     paddingVertical: 16,
     alignItems: 'center',
     borderWidth: 1,
     borderColor: '#e2e8f0',
+    marginBottom: 12,
   },
   actionText: {
     color: '#0f172a',
@@ -1039,6 +1788,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     marginTop: 8,
   },
+
   sectionHeading: {
     color: '#0f172a',
     fontSize: 16,
@@ -1057,6 +1807,7 @@ const styles = StyleSheet.create({
     lineHeight: 19,
     marginBottom: 16,
   },
+
   inputCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1097,6 +1848,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
   },
+
   connectorLine: {
     width: 2,
     height: 18,
@@ -1104,6 +1856,7 @@ const styles = StyleSheet.create({
     marginLeft: 28,
     marginVertical: 8,
   },
+
   helperRow: {
     flexDirection: 'row',
     gap: 10,
@@ -1126,6 +1879,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     marginLeft: 8,
   },
+
   loadingRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1137,6 +1891,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginLeft: 10,
   },
+
   suggestionRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1163,6 +1918,7 @@ const styles = StyleSheet.create({
     color: '#64748b',
     fontSize: 12,
   },
+
   routeSummaryCard: {
     backgroundColor: '#f8fafc',
     borderRadius: 20,
@@ -1199,6 +1955,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     marginLeft: 6,
   },
+
   vehicleCard: {
     backgroundColor: '#ffffff',
     borderRadius: 22,
@@ -1257,6 +2014,71 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '800',
   },
+
+  paymentWrap: {
+    marginBottom: 16,
+  },
+  paymentOptionCard: {
+    backgroundColor: '#ffffff',
+    borderRadius: 20,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  paymentOptionCardActive: {
+    backgroundColor: '#f0fdf4',
+    borderColor: '#86efac',
+  },
+  paymentOptionTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  paymentOptionTitle: {
+    color: '#0f172a',
+    fontSize: 15,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  paymentOptionTitleActive: {
+    color: '#166534',
+  },
+  paymentOptionSubtitle: {
+    color: '#64748b',
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '600',
+  },
+  paymentMetaPill: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#eff6ff',
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  paymentMetaPillText: {
+    color: '#1d4ed8',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  paymentWarningCard: {
+    backgroundColor: '#fef3c7',
+    borderRadius: 16,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  paymentWarningText: {
+    color: '#92400e',
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 18,
+    marginLeft: 8,
+    flex: 1,
+  },
+
   primaryButton: {
     backgroundColor: '#16a34a',
     borderRadius: 18,
@@ -1272,6 +2094,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '800',
   },
+
   trackingCard: {
     backgroundColor: '#f8fafc',
     borderRadius: 18,
@@ -1290,6 +2113,43 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '800',
   },
+
+  statusNoticeCard: {
+    backgroundColor: '#fef3c7',
+    borderRadius: 18,
+    padding: 14,
+    marginBottom: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  statusNoticeText: {
+    color: '#92400e',
+    fontSize: 13,
+    fontWeight: '700',
+    lineHeight: 19,
+    marginLeft: 10,
+    flex: 1,
+  },
+
+  driverPhoneCard: {
+    backgroundColor: '#eff6ff',
+    borderRadius: 18,
+    padding: 14,
+    marginBottom: 8,
+  },
+  driverPhoneLabel: {
+    color: '#1d4ed8',
+    fontSize: 12,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    marginBottom: 4,
+  },
+  driverPhoneValue: {
+    color: '#0f172a',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+
   loadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(6,17,31,0.28)',

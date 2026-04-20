@@ -20,6 +20,9 @@ type Driver = {
   full_name: string;
   email: string | null;
   phone: string | null;
+  avatar_url?: string | null;
+  rating_average?: number | null;
+  rating_count?: number | null;
 };
 
 type Booking = {
@@ -195,6 +198,87 @@ function connectionLabel(stale: boolean, failedRefreshCount: number) {
   return 'Live connection healthy';
 }
 
+function initialsFromName(name?: string | null, fallback = 'D') {
+  const safe = (name || '').trim();
+  if (!safe) return fallback;
+
+  const parts = safe.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase();
+}
+
+function ratingLabel(count: number) {
+  return `${count} rating${count === 1 ? '' : 's'}`;
+}
+
+function RatingStars({ value }: { value: number }) {
+  const rounded = Math.round(value);
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+      {[1, 2, 3, 4, 5].map((star) => (
+        <span
+          key={star}
+          style={{
+            color: '#f59e0b',
+            fontSize: 16,
+            lineHeight: 1,
+          }}
+        >
+          {star <= rounded ? '★' : '☆'}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function DriverAvatar({
+  name,
+  avatarUrl,
+  size = 56,
+}: {
+  name?: string | null;
+  avatarUrl?: string | null;
+  size?: number;
+}) {
+  if (avatarUrl) {
+    return (
+      <img
+        src={avatarUrl}
+        alt={name || 'Driver avatar'}
+        style={{
+          width: size,
+          height: size,
+          borderRadius: size / 2,
+          objectFit: 'cover',
+          background: '#e2e8f0',
+          flexShrink: 0,
+        }}
+      />
+    );
+  }
+
+  return (
+    <div
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        background: 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)',
+        color: '#ffffff',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontWeight: 900,
+        fontSize: size >= 56 ? 18 : 14,
+        flexShrink: 0,
+      }}
+    >
+      {initialsFromName(name, 'D')}
+    </div>
+  );
+}
+
 export default function Page() {
   const [data, setData] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -364,11 +448,99 @@ export default function Page() {
                 {data.pendingDrivers.map((driver) => {
                   const needsAccountApproval = driver.verification_status !== 'approved';
                   const needsDocsApproval = driver.documents_status !== 'approved';
+                  const ratingAverage = Number(driver.rating_average ?? 0);
+                  const ratingCount = Number(driver.rating_count ?? 0);
 
                   return (
-                    <div key={driver.profile_id} style={{ border: '1px solid #e2e8f0', borderRadius: 18, padding: 16 }}>
-                      <div style={{ fontWeight: 800, marginBottom: 4 }}>{driver.full_name}</div>
-                      <div style={{ color: '#64748b', marginBottom: 10 }}>{driver.email || 'No email'}</div>
+                    <div
+                      key={driver.profile_id}
+                      style={{
+                        border: '1px solid #e2e8f0',
+                        borderRadius: 18,
+                        padding: 16,
+                        background: '#fcfdff',
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          gap: 16,
+                          flexWrap: 'wrap',
+                          marginBottom: 12,
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            gap: 14,
+                            alignItems: 'center',
+                            flex: 1,
+                            minWidth: 240,
+                          }}
+                        >
+                          <DriverAvatar
+                            name={driver.full_name}
+                            avatarUrl={driver.avatar_url}
+                            size={58}
+                          />
+
+                          <div style={{ flex: 1 }}>
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 8,
+                                flexWrap: 'wrap',
+                                marginBottom: 4,
+                              }}
+                            >
+                              <div style={{ fontWeight: 900, fontSize: 16 }}>
+                                {driver.full_name}
+                              </div>
+
+                              {driver.verified_badge ? (
+                                <span style={chip('#dcfce7', '#166534')}>Verified</span>
+                              ) : null}
+                            </div>
+
+                            <div style={{ color: '#64748b', marginBottom: 4 }}>
+                              {driver.email || 'No email'}
+                            </div>
+                            <div style={{ color: '#64748b', fontSize: 13 }}>
+                              {driver.phone || 'No phone'}
+                            </div>
+
+                            <div style={{ marginTop: 10 }}>
+                              {ratingCount > 0 ? (
+                                <>
+                                  <RatingStars value={ratingAverage} />
+                                  <div
+                                    style={{
+                                      color: '#475569',
+                                      fontSize: 12,
+                                      fontWeight: 700,
+                                      marginTop: 6,
+                                    }}
+                                  >
+                                    {ratingAverage.toFixed(1)} • {ratingLabel(ratingCount)}
+                                  </div>
+                                </>
+                              ) : (
+                                <div
+                                  style={{
+                                    color: '#94a3b8',
+                                    fontSize: 12,
+                                    fontWeight: 700,
+                                  }}
+                                >
+                                  No ratings yet
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
 
                       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
                         <span style={chip('#fef3c7', '#b45309')}>
@@ -431,19 +603,118 @@ export default function Page() {
               <p style={{ color: '#64748b' }}>No fully approved drivers yet.</p>
             ) : (
               <div style={{ display: 'grid', gap: 12 }}>
-                {data.approvedDrivers.map((driver) => (
-                  <div key={driver.profile_id} style={{ border: '1px solid #e2e8f0', borderRadius: 18, padding: 16 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                      <div>
-                        <div style={{ fontWeight: 800, marginBottom: 4 }}>{driver.full_name}</div>
-                        <div style={{ color: '#64748b' }}>{driver.email || 'No email'}</div>
+                {data.approvedDrivers.map((driver) => {
+                  const ratingAverage = Number(driver.rating_average ?? 0);
+                  const ratingCount = Number(driver.rating_count ?? 0);
+
+                  return (
+                    <div
+                      key={driver.profile_id}
+                      style={{
+                        border: '1px solid #e2e8f0',
+                        borderRadius: 18,
+                        padding: 16,
+                        background: '#fcfdff',
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          gap: 14,
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            gap: 14,
+                            alignItems: 'center',
+                            flex: 1,
+                            minWidth: 240,
+                          }}
+                        >
+                          <DriverAvatar
+                            name={driver.full_name}
+                            avatarUrl={driver.avatar_url}
+                            size={58}
+                          />
+
+                          <div style={{ flex: 1 }}>
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 8,
+                                flexWrap: 'wrap',
+                                marginBottom: 4,
+                              }}
+                            >
+                              <div style={{ fontWeight: 900, fontSize: 16 }}>
+                                {driver.full_name}
+                              </div>
+
+                              {driver.verified_badge ? (
+                                <span style={chip('#dcfce7', '#166534')}>Verified</span>
+                              ) : null}
+                            </div>
+
+                            <div style={{ color: '#64748b', marginBottom: 4 }}>
+                              {driver.email || 'No email'}
+                            </div>
+
+                            <div style={{ color: '#64748b', fontSize: 13, marginBottom: 10 }}>
+                              {driver.phone || 'No phone'}
+                            </div>
+
+                            {ratingCount > 0 ? (
+                              <>
+                                <RatingStars value={ratingAverage} />
+                                <div
+                                  style={{
+                                    color: '#475569',
+                                    fontSize: 12,
+                                    fontWeight: 700,
+                                    marginTop: 6,
+                                  }}
+                                >
+                                  {ratingAverage.toFixed(1)} • {ratingLabel(ratingCount)}
+                                </div>
+                              </>
+                            ) : (
+                              <div
+                                style={{
+                                  color: '#94a3b8',
+                                  fontSize: 12,
+                                  fontWeight: 700,
+                                }}
+                              >
+                                No ratings yet
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div
+                          style={{
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 8,
+                            alignItems: 'flex-end',
+                            justifyContent: 'center',
+                          }}
+                        >
+                          <span style={onlineChip(driver.is_online, driver.is_available)}>
+                            {onlineLabel(driver.is_online, driver.is_available)}
+                          </span>
+                          <span style={chip('#eff6ff', '#1d4ed8')}>
+                            {titleize(driver.verification_status)}
+                          </span>
+                        </div>
                       </div>
-                      <span style={onlineChip(driver.is_online, driver.is_available)}>
-                        {onlineLabel(driver.is_online, driver.is_available)}
-                      </span>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </section>
